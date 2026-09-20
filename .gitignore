@@ -1,0 +1,36 @@
+# 依赖与构建产物
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+public/vendor/
+
+# ── 个人开发数据：每位开发者本机各自一份，不要提交 ──
+
+# 环境变量：只提交模板 .env.example，真实 API Key 写在 .env.local
+.env
+.env.*
+!.env.example
+
+# 本机运行数据：示例数据库、结果媒体、TLS 证书、隧道 Token
+.local/
+
+# Cloudflare 隧道：各自从 cloudflare/tunnel.example.json 复制后填写
+cloudflare/tunnel.json
+
+# 维护者的联调与排障记录，不属于对外文档
+docs/internal/
+
+# 编辑器、系统与 AI 助手的个人设置
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.claude/settings.local.json
+AGENTS.md
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*

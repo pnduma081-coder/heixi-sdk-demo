@@ -1,0 +1,10 @@
+{
+  "name": "black-rhino-sdk",
+  "tunnelId": "<隧道 UUID>",
+  "accountId": "<Cloudflare 账号 ID>",
+  "publicOrigin": "https://<your-callback-origin>",
+  "service": "http://127.0.0.1:3443",
+  "published": false,
+  "appOrigin": "https://<your-app-origin>",
+  "appPublished": false
+}
