@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { onlineSdkUrl, sdkDocs } from "../shared/sdk-release.ts";
+import {
+  documentationVersions,
+  type MerchantVersion,
+  onlineSdkUrl,
+  onlineSdkVersion,
+  sdkDocs,
+} from "../shared/sdk-release.ts";
 import type {
   ConnectionReport,
   DemoConfig,
@@ -31,7 +37,8 @@ const checking = ref(false),
   connection = ref<ConnectionReport>(),
   connectionError = ref("");
 const connectionLifetime = new AbortController();
-const docs = sdkDocs();
+const documentVersion = ref<MerchantVersion>(onlineSdkVersion);
+const docs = computed(() => sdkDocs(documentVersion.value));
 const sdkAddress = onlineSdkUrl;
 const sdkLoading = ref(false),
   sdkLoaded = ref(false),
@@ -138,12 +145,14 @@ onBeforeUnmount(() => {
     </template>
     <template v-else-if="section === 'credits'">
       <div class="page-heading"><div><h1>算力账户</h1><p>查看当前账户的充值、消费与退款记录。</p></div><button @click="emit('refresh')"><Icon name="refresh" />刷新记录</button></div>
+      <p v-if="session.eventSyncError" class="error">{{ session.eventSyncError }}</p>
       <div class="balance-banner"><div><span>当前可用算力</span><strong>{{ session.user.credits.toLocaleString() }}<small>算力</small></strong><p>{{ session.user.name }} · 本地测试账户</p></div><button class="primary" @click="emit('recharge')">增加测试算力</button></div>
       <p v-if="session.pendingSales?.length" class="hint" role="status">有 {{ session.pendingSales.length }} 条售价结算等待原报价或原扣费关联；关联完成前不改变用户余额。</p>
       <div class="surface"><h2>算力明细</h2><table><thead><tr><th>时间</th><th>业务类型</th><th>变动算力</th><th>余额</th></tr></thead><tbody><tr v-for="item in session.ledger" :key="item.id"><td>{{ new Date(item.createdAt).toLocaleString() }}</td><td>{{ types[item.kind] || item.kind }}</td><td :class="item.delta > 0 ? 'positive' : 'negative'">{{ item.delta > 0 ? '+' : '' }}{{ item.delta }}</td><td>{{ item.balance }}</td></tr></tbody></table><p v-if="!session.ledger.length" class="empty-caption">暂无算力记录，可以先增加测试算力开始创作。</p></div>
       <details class="surface"><summary>平台成本记录（AI 成本不计入用户余额）</summary><p class="hint">AI 生成按确认时的商户售价结算。模板解锁保留原扣费规则，暂未接入自定义售价。</p><table><thead><tr><th>时间</th><th>平台业务</th><th>成本变动</th></tr></thead><tbody><tr v-for="item in session.platformCosts || []" :key="item.eventId"><td>{{ new Date(item.createdAt).toLocaleString() }}</td><td>{{ item.kind }}</td><td>{{ item.delta }}</td></tr></tbody></table><p v-if="!session.platformCosts?.length" class="empty-caption">暂无平台成本记录</p></details>
     </template>
     <template v-else-if="section === 'works'">
+      <p class="hint">这里展示 API 生成及此前已保存的作品。SDK 新生成结果请在创作页面的“历史”中查看。</p>
       <div class="page-heading"><div><h1>我的作品</h1><p>已保存到当前平台的创作结果，按用户独立管理。</p></div><button @click="emit('refresh')"><Icon name="refresh" />刷新作品</button></div>
       <div class="tabs"><button v-for="[id, title] in [['all', '全部作品'], ['image', '图片'], ['video', '视频'], ['text', '文本']]" :key="id" :class="{ active: filter === id }" @click="filter = id">{{ title }}</button></div>
       <div v-if="works.length" class="works-grid"><article v-for="work in works" :key="work.id" class="work-card"><button class="work-preview" @click="selected = work"><img v-if="work.files[0]?.contentType.startsWith('image/')" :src="`/files/${work.files[0].id}`" alt="作品预览" /><span v-else-if="work.files[0]?.contentType.startsWith('video/')" class="video-preview"><Icon name="video" />视频作品</span><span v-else class="text-preview">{{ textOf(work) }}</span></button><div class="work-info"><strong>{{ work.source === 'APPLY' ? '已应用作品' : '生成作品' }}</strong><span class="pill">{{ status[work.status] || work.status }}</span><small>{{ new Date(work.createdAt).toLocaleString() }}</small><button @click="selected = work">查看作品 <Icon name="arrow" /></button></div></article></div>
@@ -157,11 +166,11 @@ onBeforeUnmount(() => {
       <div class="integration-grid">
         <div class="surface">
           <h2>接入状态</h2>
-          <div class="setting-row"><span>接入环境</span><span>正式 SDK 0.3.0</span></div>
-          <div class="setting-row"><span>商户 API Key</span><span class="pill" :class="{ 'pill--green': config.apiReady }">{{ config.apiReady ? '已配置，待检测' : '待配置' }}</span></div>
+          <div class="setting-row"><span>接入环境</span><span>正式 SDK {{ onlineSdkVersion }}</span></div>
+          <div class="setting-row"><span>商户 AK / SK</span><span class="pill" :class="{ 'pill--green': config.apiReady }">{{ config.apiReady ? '已配置，待检测' : '待配置' }}</span></div>
           <div class="setting-row"><span>SDK 组件</span><span class="pill" :class="{ 'pill--green': sdkLoaded }">{{ sdkLoaded ? '本页已加载' : 'CDN 地址已配置，待浏览器加载' }}</span></div>
-          <p class="hint">API Key 在本项目 .env.local 中填写，保存后由用户重启本项目。回调验签配置仅由服务端获取。</p>
-          <p class="hint">固定加载正式 0.3.0 产物，加载失败不会回退到本地 SDK。嵌入页面由平台授权响应确定。</p>
+          <p class="hint">AK / SK 在本项目 .env.local 中填写，保存后由用户重启本项目。回调验签配置仅由服务端获取。</p>
+          <p class="hint">固定加载正式 {{ onlineSdkVersion }} 产物。嵌入页面由平台授权响应确定；同版本重新发布后请刷新页面。</p>
           <p v-for="issue in config.configurationIssues" :key="issue" class="hint">{{ issue }}</p>
           <button :disabled="sdkLoading || !config.sdkReady" @click="checkSdkFile">{{ sdkLoading ? '正在加载组件…' : '检测 SDK 文件加载' }}</button>
           <p v-if="sdkLoadError" class="error" role="alert">{{ sdkLoadError }}</p>
@@ -178,10 +187,10 @@ onBeforeUnmount(() => {
       </div>
       <div class="surface integration-help"><h2>连接前检查</h2><ol>
         <li>当前环境的商户已启用，所属站点有效，并获得对应创作功能授权。</li>
-        <li>在黑犀平台保存实际 HTTPS 宿主页 origin 与两个回调地址。回调域名不等于宿主页入口。</li>
+        <li>SDK 需在黑犀平台保存实际 HTTPS 宿主页 origin 和回调配置；纯 API 0.4.0 回调可选。回调域名不等于宿主页入口。</li>
         <li>通过上方 HTTPS 宿主页打开 SDK；页面代理与回调使用不同域名，本机继续使用 HTTP 回源。</li>
         <li>检测不会发起生成或充值；真实线上生成会消耗商户余额，由用户明确执行。</li>
-      </ol><div class="actions"><a class="button" :href="docs.sdkDocsUrl" target="_blank" rel="noreferrer">SDK 文档</a><a class="button" :href="docs.apiDocsUrl" target="_blank" rel="noreferrer">API 文档</a></div></div>
+      </ol><div class="actions"><label>文档版本 <select v-model="documentVersion"><option v-for="version in documentationVersions" :key="version" :value="version">{{ version }}</option></select></label><a class="button" :href="docs.sdkDocsUrl" target="_blank" rel="noreferrer">SDK 文档</a><a class="button" :href="docs.apiDocsUrl" target="_blank" rel="noreferrer">API 文档</a><a :href="docs.sdkMarkdownUrl" target="_blank" rel="noreferrer">SDK Markdown</a><a :href="docs.apiMarkdownUrl" target="_blank" rel="noreferrer">API Markdown</a><a :href="docs.openApiUrl" target="_blank" rel="noreferrer">OpenAPI JSON</a></div></div>
     </template>
   </div>
 </template>

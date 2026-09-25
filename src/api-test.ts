@@ -3,46 +3,42 @@ import type {
   RequestRecord,
   StoredResult,
 } from "../shared/types.ts";
+import { imageCapability, imageOptions } from "./model-options.ts";
 
 export const asObject = (value: unknown): JsonObject =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : {};
-const strings = (value: unknown) =>
-  Array.isArray(value)
-    ? value.filter(
-        (item): item is string => typeof item === "string" && Boolean(item),
-      )
-    : [];
 export function mainImageRequest(
   model: JsonObject,
   asset: { assetId: string; name: string },
   prompt: string,
   clientRequestId: string,
 ): JsonObject {
-  const image = asObject(asObject(model.capabilities).image);
-  const ratios = strings(image.outputRatios),
-    resolutions = strings(image.resolutionOptions);
+  const capability = imageCapability(model);
   if (
     typeof model.id !== "string" ||
-    typeof model.parameterSchemaVersion !== "string" ||
-    !ratios.length
+    typeof model.parameterSchemaVersion !== "string"
   )
     throw new Error("模型配置不完整，请重新加载模型");
   if (!asset.assetId || !prompt.trim())
     throw new Error("请上传一张商品图片并填写需求");
+  if (
+    (typeof capability.minInputImages === "number" &&
+      capability.minInputImages > 1) ||
+    (typeof capability.maxInputImages === "number" &&
+      capability.maxInputImages < 1)
+  )
+    throw new Error("此模型不支持单张参考图，请选择支持单图的主图模型");
   return {
     clientRequestId,
     feature: "MAIN_IMAGE",
     modelId: model.id,
     parameterSchemaVersion: model.parameterSchemaVersion,
-    ratio: ratios.includes("1:1") ? "1:1" : ratios[0],
-    ...(resolutions.length
-      ? { resolution: resolutions.includes("1K") ? "1K" : resolutions[0] }
-      : {}),
+    ...imageOptions(capability),
     outputCount: 1,
     language: "zh-CN",
-    contentLanguage: "NONE",
+    contentLanguage: "zh-CN",
     platform: "TAOBAO",
     sourceAssetIds: [asset.assetId],
     sourceRoles: ["PRODUCT_MAIN"],

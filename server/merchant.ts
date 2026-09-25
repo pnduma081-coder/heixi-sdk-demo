@@ -1,14 +1,22 @@
 import type { JsonObject } from "../shared/types.ts";
 import { AppError, object } from "./errors.ts";
+import { type MerchantAuth, merchantHeaders } from "./merchant-auth.ts";
 
 export class MerchantClient {
   apiOrigin: string;
   key: string;
   transport: typeof fetch;
-  constructor(origin: string, key: string, transport: typeof fetch = fetch) {
+  auth: MerchantAuth;
+  constructor(
+    origin: string,
+    key: string,
+    transport: typeof fetch = fetch,
+    auth: MerchantAuth = {},
+  ) {
     this.apiOrigin = origin;
     this.key = key;
     this.transport = transport;
+    this.auth = auth;
   }
   async request(
     path: string,
@@ -20,16 +28,11 @@ export class MerchantClient {
       timeoutMs?: number;
     } = {},
   ): Promise<unknown> {
-    if (!this.key)
-      throw new AppError(
-        503,
-        "请在本项目 .env.local填写 BLACK_RHINO_API_KEY 并重启示例",
-      );
     if (!path.startsWith("/open/") || /[?#\\]/.test(path))
       throw new AppError(400, "接口路径不允许");
     const url = new URL(`/api/v1${path}`, this.apiOrigin);
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.key}`,
+      ...merchantHeaders(this.key, this.auth),
       Accept: "application/json",
     };
     let body: string | FormData | undefined;
@@ -85,10 +88,22 @@ export class MerchantClient {
           ]),
       );
       throw new AppError(
-        response.ok ? 400 : response.status,
-        response.status === 401 || envelope.code === 40100
-          ? "黑犀拒绝了商户授权，请到“接入设置 → 检测接入”定位；平台的“未登录”也可能表示 Key、商户状态或 SDK 允许来源校验失败"
-          : "黑犀 API 调用失败",
+        response.ok
+          ? envelope.code === 40100
+            ? 401
+            : envelope.code === 40300
+              ? 403
+              : 400
+          : response.status,
+        response.status === 401 || (response.ok && envelope.code === 40100)
+          ? this.auth.version === "0.4.0"
+            ? "商户凭据失效或 AK/SK 不匹配，请检查接入配置与商户状态"
+            : "旧版 API 拒绝请求（401），请结合安全详情检查商户凭证、externalUserId、功能授权或 SDK 来源"
+          : response.status === 403 || (response.ok && envelope.code === 40300)
+            ? "功能或 SDK 来源未授权，请检查商户功能权限与登记的 HTTPS 来源；无需重新登录"
+            : response.status === 400 || response.ok
+              ? "请求未被接受，请核对参数或业务条件，并查看安全错误详情与 traceId"
+              : "黑犀 API 调用失败",
         details,
       );
     }

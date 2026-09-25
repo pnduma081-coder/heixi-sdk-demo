@@ -1,5 +1,6 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { AppError } from "./errors.ts";
+import { type MerchantAuth, merchantHeaders } from "./merchant-auth.ts";
 import { verifyWebhook, webhookHeaders } from "./webhook.ts";
 
 type Topic = "credits" | "generation";
@@ -12,10 +13,17 @@ export class WebhookKeys {
   private readonly origin: string;
   private readonly apiKey: string;
   private readonly transport: typeof fetch;
-  constructor(origin: string, apiKey: string, transport: typeof fetch = fetch) {
+  private readonly auth: MerchantAuth;
+  constructor(
+    origin: string,
+    apiKey: string,
+    transport: typeof fetch = fetch,
+    auth: MerchantAuth = {},
+  ) {
     this.origin = origin;
     this.apiKey = apiKey;
     this.transport = transport;
+    this.auth = auth;
   }
 
   // 【SDK 对接点 5】按 topic/keyId 用 API Key 自动领取验签密钥，商户无需手工配置 Secret。
@@ -59,7 +67,7 @@ export class WebhookKeys {
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${this.apiKey}`,
+            ...merchantHeaders(this.apiKey, this.auth),
             "Content-Type": "application/json",
             Accept: "application/json",
           },

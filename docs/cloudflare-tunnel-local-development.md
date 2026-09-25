@@ -4,7 +4,7 @@
 
 本地开发时，Tunnel 解决两个问题，本机全程保持 HTTP 即可：
 
-1. **回调入口（必需）**：平台通过公网 HTTPS 把算力和生成结果回调投递到本机。
+1. **回调入口（SDK 需要；0.4.0 纯 API 可选）**：平台通过公网 HTTPS 把算力和生成结果回调投递到本机。
 2. **页面入口（可选，完整测试 SDK 时需要）**：SDK 要求宿主页面是 HTTPS。给同一条隧道再加一个页面主机名，浏览器就能以 HTTPS 打开本机示例。
 
 无需开放路由器入站端口。Cloudflare 与本机 `cloudflared` 之间使用加密隧道，HTTP 只用于本机回环回源。[官方原理](https://developers.cloudflare.com/tunnel/)
@@ -315,7 +315,7 @@ https://实际分配的名称.trycloudflare.com/webhooks/generation
 
 `appPublished: true` 时，项目会自动把 Host 校验、Origin 校验、Cookie、SDK 签名的 `parentOrigin` 和 Vite 热更新都对齐到 `appOrigin`。如果不用 Cloudflare 页面入口，而是用自己的 HTTPS 反向代理，可以在 `.env.local` 中手动设置 `BLACK_RHINO_HOST_ORIGIN`。
 
-本示例固定使用正式 API 与 CDN SDK 0.3.0，其余配置见[正式接入说明](online-sdk-integration.md)。
+development 适配正式 API 地址与 CDN SDK 0.4.0，须兼容平台先完成部署，其余配置见[正式接入说明](online-sdk-integration.md)。
 
 如需使用本机 HTTPS（`pnpm dev:https`），先停止同端口的 HTTP 服务，再按 [备用 HTTPS 回源说明](../cloudflare/README.md#备用本机-https-回源) 同步修改回源并验证证书。不能让 HTTP 回源的隧道连到已改为 HTTPS 的端口。
 

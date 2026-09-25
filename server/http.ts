@@ -64,6 +64,7 @@ export function createHandler(
     config.apiOrigin,
     config.apiKey,
     api.transport,
+    api.auth,
   );
   return async (
     req: IncomingMessage,
@@ -141,6 +142,7 @@ export function createHandler(
           results: store.results(user.id),
           requests: store.requests(user.id),
           generationFailure: results.generationFailures.get(user.id),
+          eventSyncError: results.syncIssue(user.id),
           platformCosts: store.platformCosts(user.id),
           pendingSales: store.sales.pending(user.id),
         });
@@ -202,7 +204,10 @@ export function createHandler(
         if (error instanceof AppError) throw error;
         throw new AppError(400, "JSON 格式错误");
       }
-      if (path === "/api/connection/check") {
+      if (path === "/api/events/sync" || path === "/api/events/retry") {
+        if (path === "/api/events/retry") results.inbox.retry(user.id);
+        json(res, await results.syncEvents(user));
+      } else if (path === "/api/connection/check") {
         json(
           res,
           await checkConnection(
@@ -226,15 +231,23 @@ export function createHandler(
       } else if (path === "/api/sdk/signature") {
         if (body.parentOrigin !== hostOrigin)
           throw new AppError(403, "SDK 来源不匹配");
-        json(res, {
-          signature: await sdkSignature(api, user.externalUserId, hostOrigin),
-        });
-      } else if (path === "/api/sdk/approve")
+        const signature = await sdkSignature(
+          api,
+          user.externalUserId,
+          hostOrigin,
+        );
+        results.syncState.watch(user.id);
+        results.onActivity?.(user.id);
+        json(res, { signature });
+      } else if (path === "/api/sdk/approve") {
+        results.onActivity?.(user.id);
         json(res, await operations.approve(user, body));
-      else if (path === "/api/sdk/result") {
+      } else if (path === "/api/sdk/result") {
         await results.sdk(user, uuid(body.eventId));
         json(res, { received: true });
-      } else if (path === "/api/call")
+      } else if (path === "/api/call") {
+        if (["design", "apparel", "video"].includes(String(body.operation)))
+          results.onActivity?.(user.id);
         json(
           res,
           await operations.call(
@@ -243,7 +256,7 @@ export function createHandler(
             object(body.params),
           ),
         );
-      else throw new AppError(404, "接口不存在");
+      } else throw new AppError(404, "接口不存在");
     } catch (error) {
       errorResponse(res, error);
     }

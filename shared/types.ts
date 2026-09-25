@@ -55,6 +55,7 @@ export type SessionState = {
   }>;
   pendingSales?: JsonObject[];
   generationFailure?: { submissionNo: string; reason: string; at: string };
+  eventSyncError?: string;
 };
 export type DemoConfig = {
   apiOrigin?: string;

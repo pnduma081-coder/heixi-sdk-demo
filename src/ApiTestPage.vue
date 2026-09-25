@@ -13,8 +13,12 @@ import {
   testRequests,
   testResults,
 } from "./api-test.ts";
+import { GenerationPoller } from "./generation-poller.ts";
 
-const props = defineProps<{ session: SessionState; ready: boolean }>();
+const props = defineProps<{
+  session: SessionState;
+  ready: boolean;
+}>();
 const emit = defineEmits<{ refresh: [] }>();
 const actorId = props.session.user.id;
 const lifetime = new AbortController();
@@ -32,8 +36,7 @@ const originalRequest = ref<JsonObject>(),
   submissionNo = ref("");
 const finalStatus = ref<JsonObject>(),
   statusError = ref("");
-let timer: ReturnType<typeof setTimeout> | undefined;
-let pollRevision = 0;
+const pollPaused = ref(false);
 const requests = computed(() => testRequests(props.session.requests));
 const results = computed(() =>
   testResults(props.session.results, props.session.requests, actorId),
@@ -44,11 +47,11 @@ const saved = computed(() =>
 const statusText = computed(() => {
   if (saved.value)
     return saved.value.files.length
-      ? "已收到回调，结果图片已保存"
-      : "已收到终态回调，本次未生成可保存图片";
+      ? "结果图片已保存"
+      : "已保存终态，本次未生成可保存图片";
   if (finalStatus.value?.terminal === true)
-    return "平台已结束生成，等待结果回调保存";
-  if (submissionNo.value) return "已受理，正在生成；结果将在回调保存后显示";
+    return "平台已结束生成，后台继续同步和保存结果，可手动刷新查看";
+  if (submissionNo.value) return "已受理，正在生成；结果保存后显示";
   if (busy.value && originalRequest.value) return "正在提交生成请求，请稍候";
   if (originalRequest.value)
     return submitted.value
@@ -153,20 +156,35 @@ async function submit() {
     if (!lifetime.signal.aborted) emit("refresh");
   }
 }
-async function readStatus() {
-  statusError.value = "";
-  if (submissionNo.value && !saved.value) {
-    const no = submissionNo.value;
-    try {
-      const result = asObject(await call("generation", { submissionNo: no }));
-      if (!lifetime.signal.aborted && no === submissionNo.value)
-        finalStatus.value = result;
-    } catch (cause) {
-      if (!lifetime.signal.aborted && no === submissionNo.value)
-        statusError.value = message(cause);
-    }
-  }
-  if (!lifetime.signal.aborted) emit("refresh");
+const statusPoller = new GenerationPoller<JsonObject>({
+  read: async (no, signal) =>
+    asObject(
+      await api("/api/call", {
+        body: { operation: "generation", params: { submissionNo: no } },
+        userId: actorId,
+        signal: AbortSignal.any([lifetime.signal, signal]),
+      }),
+    ),
+  apply: (result) => {
+    finalStatus.value = result;
+    statusError.value = "";
+    const complete = result.terminal === true || Boolean(saved.value);
+    if (complete) emit("refresh");
+    return complete;
+  },
+  error: (cause) => {
+    statusError.value = message(cause);
+  },
+  state: (state) => {
+    pollPaused.value = state === "paused";
+  },
+  hidden: () => document.hidden,
+});
+function readStatus() {
+  return statusPoller.refresh(submissionNo.value);
+}
+function visibilityChanged() {
+  statusPoller.visibilityChanged();
 }
 function restore(item: RequestRecord) {
   stopPolling();
@@ -201,34 +219,35 @@ function newTest() {
   submitted.value = false;
   error.value = "";
   statusError.value = "";
+  pollPaused.value = false;
+}
+async function retryEvents() {
+  try {
+    await api("/api/events/retry", {
+      body: {},
+      userId: actorId,
+      signal: lifetime.signal,
+    });
+    if (!lifetime.signal.aborted) emit("refresh");
+  } catch (cause) {
+    if (!lifetime.signal.aborted) statusError.value = message(cause);
+  }
 }
 function stopPolling() {
-  pollRevision++;
-  clearTimeout(timer);
+  statusPoller.stop();
 }
 function startPolling() {
-  stopPolling();
-  const revision = pollRevision;
-  const tick = async () => {
-    await readStatus();
-    if (
-      revision === pollRevision &&
-      !lifetime.signal.aborted &&
-      submissionNo.value &&
-      !saved.value &&
-      finalStatus.value?.terminal !== true
-    )
-      timer = setTimeout(tick, 3000);
-  };
-  if (submissionNo.value && !saved.value) void tick();
+  statusPoller.start(submissionNo.value);
 }
 onMounted(() => {
+  document.addEventListener("visibilitychange", visibilityChanged);
   if (requests.value[0]) restore(requests.value[0]);
   if (props.ready) void loadModel();
 });
 onBeforeUnmount(() => {
   lifetime.abort();
-  stopPolling();
+  statusPoller.dispose();
+  document.removeEventListener("visibilitychange", visibilityChanged);
   if (preview.value) URL.revokeObjectURL(preview.value);
 });
 </script>
@@ -236,6 +255,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="management-page api-test-page">
     <div class="page-heading"><div><h1>API 测试</h1><p>上传商品图片并填写需求，通过 API 生成一张爆款首图。</p></div><span class="pill">{{ session.user.name }}</span></div>
+    <p class="hint">由商户后端直接调用生成接口，实际消耗由黑犀商户账户结算。</p>
     <p v-if="!ready" class="error">请先在接入设置中完成 API 配置。</p>
     <div class="api-test-layout">
       <form class="surface api-test-form" @submit.prevent="submit">
@@ -254,12 +274,15 @@ onBeforeUnmount(() => {
         <div class="page-heading"><h2>生成结果</h2><button type="button" @click="readStatus">刷新状态</button></div>
         <p role="status">{{ statusText }}</p>
         <p v-if="submissionNo" class="hint">受理号：{{ submissionNo }}</p>
-        <p class="hint">这里仅展示服务器收到生成结果回调后保存的图片，刷新页面后仍会保留。</p>
+        <p class="hint">服务器轮询事件或收到可选回调后保存图片，刷新页面后仍会保留。</p>
+        <p v-if="finalStatus?.credits" class="hint">商户实际消费：{{ asObject(finalStatus.credits).charged }} · 退款：{{ asObject(finalStatus.credits).refunded }} · 净消费：{{ asObject(finalStatus.credits).net }}（不是用户售价）</p>
+        <p v-if="session.eventSyncError" class="error">{{ session.eventSyncError }} <button type="button" @click="retryEvents">重试待处理事件</button></p>
+        <p v-if="pollPaused" class="hint">自动状态查询已暂停（达到时限或连续失败），后台事件同步仍在运行。<button type="button" @click="startPolling">继续查询</button></p>
         <p v-if="statusError" class="error" role="alert">{{ statusError }}</p>
-        <p v-if="!saved && session.generationFailure?.submissionNo === submissionNo" class="error" role="alert">最近一次结果回调未保存：{{ session.generationFailure.reason }}（{{ new Date(session.generationFailure.at).toLocaleString() }}）。请保留原请求，等待平台重试。</p>
+        <p v-if="!saved && session.generationFailure?.submissionNo === submissionNo" class="error" role="alert">最近一次结果未保存：{{ session.generationFailure.reason }}（{{ new Date(session.generationFailure.at).toLocaleString() }}）。请保留原请求，等待服务端重试同步。</p>
         <div v-if="!results.length" class="empty-caption">暂无已保存结果</div>
         <article v-for="result in results" :key="result.id" class="api-test-result">
-          <div class="actions"><strong>{{ result.files.length ? '已回调保存' : '已收到终态回调' }}</strong><span class="pill">{{ result.status }}</span></div>
+          <div class="actions"><strong>{{ result.files.length ? '已保存' : '已保存终态' }}</strong><span class="pill">{{ result.status }}</span></div>
           <p class="hint">{{ new Date(result.createdAt).toLocaleString() }} · {{ result.submissionNo }}</p>
           <template v-for="file in result.files" :key="file.id"><a v-if="file.contentType.startsWith('image/')" :href="`/files/${file.id}`" target="_blank" rel="noreferrer"><img :src="`/files/${file.id}`" alt="API 生成并保存的主图" /></a><p class="hint">本地文件 · {{ Math.ceil(file.bytes / 1024) }} KiB</p></template>
           <p v-if="!result.files.length">本次没有可展示的图片，请查看生成状态后再试。</p>

@@ -62,7 +62,7 @@ export const examples = [
       ratio: "1:1",
       outputCount: 1,
       language: "zh-CN",
-      contentLanguage: "NONE",
+      contentLanguage: "zh-CN",
       platform: "TAOBAO",
       sourceRoles: ["PRODUCT_MAIN"],
       sourceAssetIds: [],

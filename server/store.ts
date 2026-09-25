@@ -47,6 +47,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS requests(id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id), operation TEXT NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL, response TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(user_id,id));
       CREATE TABLE IF NOT EXISTS platform_credit_events(event_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, delta INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cursors(user_id TEXT PRIMARY KEY REFERENCES users(id), event_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sdk_scan_cursors(user_id TEXT PRIMARY KEY REFERENCES users(id), event_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS api_event_cursors(user_id TEXT PRIMARY KEY REFERENCES users(id), event_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS api_request_modes(user_id TEXT NOT NULL REFERENCES users(id), request_id TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('direct','quote')), PRIMARY KEY(user_id,request_id));
     `);
         for (const [id, name] of [
           ["a", "测试用户 A"],
@@ -248,6 +251,59 @@ export class Store {
       .prepare("SELECT event_id FROM cursors WHERE user_id=?")
       .get(userId)?.event_id as string | undefined;
   }
+  apiEventCursor(userId: string) {
+    return this.db
+      .prepare("SELECT event_id FROM api_event_cursors WHERE user_id=?")
+      .get(userId)?.event_id as string | undefined;
+  }
+  sdkScanCursor(userId: string) {
+    return this.db
+      .prepare("SELECT event_id FROM sdk_scan_cursors WHERE user_id=?")
+      .get(userId)?.event_id as string | undefined;
+  }
+  saveSdkScanCursor(userId: string, cursor: string) {
+    this.db
+      .prepare(
+        "INSERT INTO sdk_scan_cursors VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET event_id=excluded.event_id",
+      )
+      .run(userId, cursor);
+  }
+  saveApiEventCursor(userId: string, cursor: string) {
+    this.db
+      .prepare(
+        "INSERT INTO api_event_cursors VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET event_id=excluded.event_id",
+      )
+      .run(userId, cursor);
+  }
+  // 新 API 请求固定直接生成；旧表仅用于保留历史请求恢复语义。
+  apiRequestMode(userId: string, id: string) {
+    return this.transaction(() => {
+      const saved = this.db
+        .prepare(
+          "SELECT mode FROM api_request_modes WHERE user_id=? AND request_id=?",
+        )
+        .get(userId, id);
+      if (saved) return saved.mode as "direct" | "quote";
+      const prior = this.db
+        .prepare("SELECT response FROM requests WHERE user_id=? AND id=?")
+        .get(userId, id);
+      const quoted = this.db
+        .prepare(
+          "SELECT 1 FROM sale_request_intents WHERE user_id=? AND request_id=?",
+        )
+        .get(userId, id);
+      if (prior && !quoted && !prior.response)
+        throw new AppError(
+          409,
+          "旧请求缺少明确的生成模式，请先核对原受理状态，不能改用直接生成重提",
+        );
+      const mode = prior || quoted ? "quote" : "direct";
+      this.db
+        .prepare("INSERT INTO api_request_modes VALUES(?,?,?)")
+        .run(userId, id, mode);
+      return mode;
+    });
+  }
   result(source: string, reference: string, userId: string) {
     const row = this.db
       .prepare("SELECT * FROM results WHERE source=? AND reference=?")
@@ -288,12 +344,14 @@ export class Store {
         this.db
           .prepare("INSERT OR IGNORE INTO events VALUES(?,?,?,?)")
           .run(event.eventId, user.id, hash, new Date().toISOString());
-      if (source === "SDK")
+      if (source === "SDK") {
         this.db
           .prepare(
             "INSERT INTO cursors VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET event_id=excluded.event_id",
           )
           .run(user.id, reference);
+        this.saveSdkScanCursor(user.id, reference);
+      }
       return this.result(source, reference, user.id) as StoredResult;
     });
   }

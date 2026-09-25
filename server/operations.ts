@@ -61,27 +61,29 @@ export class Operations {
     const id = string(body.clientRequestId, 64);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(id))
       throw new AppError(400, "clientRequestId 格式错误");
-    this.store.sales.prepareApiRequest(user.id, id);
-    return this.saved(user, id, operation, body, async () => {
-      let quote = this.store.sales.quote(user.id, id);
-      if (!quote) {
-        let value: unknown;
-        try {
-          value = await this.api.request(
-            "/open/generation-quotes",
-            user.externalUserId,
-            { body: { path, input: body } },
+    const mode = this.store.apiRequestMode(user.id, id);
+    if (mode === "direct") {
+      if (this.api.auth.version !== "0.4.0")
+        throw new AppError(400, "直接生成示例要求显式 0.4.0 协议与 AK/SK");
+      return this.saved(user, id, operation, body, async () => {
+        // 已受理旧请求由 saved 返回原响应；不改写同一请求号的原参数。
+        if (operation === "design" && body.contentLanguage === "NONE")
+          throw new AppError(
+            400,
+            "0.4.0 设计接口须填写实际内容语言（如 zh-CN）；请核对原请求状态后用新请求号提交，不能使用 NONE",
           );
-        } catch (error) {
-          if (error instanceof AppError && [404, 405].includes(error.status))
-            throw new AppError(
-              503,
-              "平台尚未提供商户售价报价接口，暂不能提交生成",
-            );
-          throw error;
-        }
-        quote = this.confirmQuote(user, value, id);
-      } else this.checkBalance(user, quote);
+        return this.api.request(path, user.externalUserId, { body });
+      });
+    }
+    // 仅恢复历史已记录的报价请求，不为新 API 请求创建报价或充值流程。
+    return this.saved(user, id, operation, body, async () => {
+      const quote = this.store.sales.quote(user.id, id);
+      if (!quote)
+        throw new AppError(
+          409,
+          "旧报价请求缺少冻结快照，请先核对原受理状态，不能改用直接生成重提",
+        );
+      this.checkBalance(user, quote);
       await this.api.request(
         `/open/generation-quotes/${quote.quoteId}/approve`,
         user.externalUserId,

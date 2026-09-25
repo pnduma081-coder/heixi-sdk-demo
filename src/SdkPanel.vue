@@ -10,7 +10,6 @@ import {
 import { onlineSdkUrl } from "../shared/sdk-release.ts";
 import type { DemoConfig, User } from "../shared/types.ts";
 import Icon from "./AppIcon.vue";
-import { api } from "./api.ts";
 import { delayedFeedback } from "./delayed-feedback.ts";
 import PagePlaceholder from "./PagePlaceholder.vue";
 import { createSdkOptions, loadSdk } from "./sdk.ts";
@@ -69,13 +68,6 @@ const workspace = new SdkWorkspace(
       });
     await loadSdk(onlineSdkUrl);
     if (signal.aborted) throw new DOMException("已取消", "AbortError");
-    const { resultCursor } = await api<{ resultCursor: string | null }>(
-      "/api/sdk/state",
-      {
-        userId: actorId,
-        signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-      },
-    );
     if (!container.value || !window.BlackRhinoSDK || signal.aborted)
       throw new DOMException("已取消", "AbortError");
     const openSdk = window.BlackRhinoSDK.init(
@@ -106,7 +98,6 @@ const workspace = new SdkWorkspace(
         // 本示例显式打开顶部栏，方便验收充值、余额和用户资料交互。
         showHeader: true,
         signal: AbortSignal.any([signal, startup.signal]),
-        ...(resultCursor ? { resultCursor } : {}),
       });
       // openSdk 已等待 ready；不再因重复 host-state 请求延迟显示整个页面。
       // 初始化期间余额可能变化，后台补齐最新状态，不阻塞首次显示。

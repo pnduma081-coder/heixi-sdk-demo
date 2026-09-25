@@ -3,11 +3,12 @@ import test from "node:test";
 import { resolveConfig } from "../server/config.ts";
 import { onlineSdkUrl } from "../shared/sdk-release.ts";
 
-test("demo always uses the published SDK/API and one data directory without merchant-specific settings", () => {
+test("demo uses the selected development SDK/API and one data directory without merchant-specific settings", () => {
   const config = resolveConfig({
     directory: "/fixture/project",
     env: {
-      BLACK_RHINO_API_KEY: "synthetic-key-only",
+      BLACK_RHINO_API_KEY: `sk-${"s".repeat(43)}`,
+      BLACK_RHINO_ACCESS_KEY: `ak-${"b".repeat(32)}`,
       BLACK_RHINO_HOST_ORIGIN: "https://merchant.example",
     },
     callbackOrigin: "https://callbacks.example",
@@ -15,19 +16,23 @@ test("demo always uses the published SDK/API and one data directory without merc
   assert.equal(config.apiOrigin, "https://api.heixi.com");
   assert.equal(config.public.sdkApiOrigin, config.apiOrigin);
   assert.equal(config.public.sdkScriptUrl, onlineSdkUrl);
-  assert.equal(config.public.sdkVersion, "0.3.0");
+  assert.equal(config.public.sdkVersion, "0.4.0");
   assert.equal(config.dataDir, "/fixture/project/.local");
   assert.equal(config.public.hostOrigin, "https://merchant.example");
   assert.equal(config.listenOrigin, "http://127.0.0.1:3443");
   assert.equal(config.public.callbackOrigin, "https://callbacks.example");
   assert.deepEqual(config.public.missing, []);
-  assert(!JSON.stringify(config.public).includes("synthetic-key-only"));
+  assert.equal(config.public.apiReady, true);
+  assert(!JSON.stringify(config.public).includes("s".repeat(43)));
 });
 
 test("demo can start without credentials; HTTPS stays optional", () => {
   const config = resolveConfig({ directory: "/fixture/project" });
   assert.equal(config.dataDir, "/fixture/project/.local");
-  assert.deepEqual(config.public.missing, ["BLACK_RHINO_API_KEY"]);
+  assert.deepEqual(config.public.missing, [
+    "BLACK_RHINO_API_KEY",
+    "BLACK_RHINO_ACCESS_KEY",
+  ]);
   assert.equal(config.public.apiReady, false);
   assert.equal(config.public.sdkReady, true);
   assert.equal(config.public.hostOrigin, "http://127.0.0.1:3443");

@@ -2,12 +2,8 @@ import { onlineSdkUrl } from "../shared/sdk-release.ts";
 import { api } from "./api.ts";
 import { approveGeneration } from "./sdk-approval.ts";
 
-// 以下类型按 SDK 0.3.0 文档手写，只覆盖本示例用到的字段；升级 SDK 时请对照官方文档核对。
+// SDK 0.4.0 最新合同：宿主签名与批准；生成结果由内嵌页面展示。
 
-type ResultHandler = (
-  result: Record<string, unknown>,
-  signal: AbortSignal,
-) => Promise<unknown>;
 export type GenerationDecision =
   | { approvalId: string }
   | { approved: false; message: string };
@@ -28,7 +24,6 @@ export type SdkOptions = {
     request: Record<string, unknown>,
     signal: AbortSignal,
   ) => Promise<GenerationDecision>;
-  onResult: ResultHandler;
   onRecharge: () => void;
   onError: (error: { code: string }) => void;
   timeoutMs: number;
@@ -39,7 +34,6 @@ export type OpenSdk = (input: {
   credits: number;
   context: Record<string, unknown>;
   profile: { displayName: string };
-  resultCursor?: string;
   resourceId?: string;
   showHeader: boolean;
   signal: AbortSignal;
@@ -94,7 +88,7 @@ export function loadSdk(source = onlineSdkUrl) {
   return loading;
 }
 
-// 传给 BlackRhinoSDK.init 的宿主回调。签名、批准和结果都经商户后端处理，
+// 传给 BlackRhinoSDK.init 的宿主回调。签名、批准经商户后端处理，
 // 浏览器不持有 API Key；actorId 固定为打开页面时的用户，换号会重建实例。
 export function createSdkOptions(
   actorId: string,
@@ -114,20 +108,13 @@ export function createSdkOptions(
       return signature;
     },
     // 【SDK 对接点 3】生成前批准：后端核对平台报价并检查商户自有余额。
-    onBeforeGenerate: (request, signal) =>
-      approveGeneration(actorId, request, signal),
-    // 【SDK 对接点 4】结果回传：浏览器只提交事件号，后端向平台重读权威结果后保存。
-    onResult: async (result, signal) => {
-      await api("/api/sdk/result", {
-        body: { eventId: result.eventId },
-        userId: actorId,
-        signal,
-      });
+    onBeforeGenerate: async (request, signal) => {
+      const decision = await approveGeneration(actorId, request, signal);
       if (!signal.aborted) handlers.onRefresh();
+      return decision;
     },
     onRecharge: handlers.onRecharge,
     onError: handlers.onError,
-    // 结果保存可能包含媒体下载，保持回调原有等待上限。
-    timeoutMs: 120000,
+    timeoutMs: 30000,
   };
 }

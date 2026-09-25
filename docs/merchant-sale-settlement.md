@@ -1,8 +1,8 @@
-# 商户售价结算
+# SDK 商户售价结算
 
 ## 两套账
 
-- 平台成本：签名回调 `credits.debited/refunded`，仅记录在 `platform_credit_events`，不影响本地用户余额。
+- 平台成本：服务端事件轮询或签名回调 `credits.debited/refunded`，仅记录在 `platform_credit_events`，不影响本地用户余额。
 - 用户售价：生成确认时冻结报价与每个 `saleItems` 分项，按 `credits.sale_debited/sale_refunded` 入用户账。
 - 模板许可：`credits.license_debited` 直接按事件金额扣用户余额，不属于生成售价结算。
 
@@ -12,7 +12,9 @@
 
 SDK保留原 `/open/sdk/generation-quotes/:id` 查询及批准路径，要求完整身份、请求号和冻结售价分项。本地不信任浏览器传入的估价。
 
-API设计/服装/视频统一先调用 `POST /open/generation-quotes`，参数为当前用户身份、原生成接口path和原input，再调用 `/open/generation-quotes/:id/approve` 和 `/submit`。原请求体和请求号不变；不回落到无售价确认的直接生成接口。提交网络超时后复用原报价，已经扣过售价的请求可恢复受理结果，不会被扣费后的余额阻止恢复。
+纯 API 新请求统一直接调用设计、服装或视频入口，不要求本地用户余额或充值，不进入 SDK 的报价批准链路。平台的可选报价接口仍属于公开协议，需要时由接入方自行调用，本示例不再提供对应业务模式。
+
+为了避免改写历史任务，已记录的旧 API 报价请求仅可按原冻结快照恢复；缺少快照时提示核对原受理状态，不重新报价、不改成新请求。已受理请求返回原保存响应。SDK 的批准、回调和售价结算流程保持。
 
 报价：`quoteId,externalUserId,clientRequestId,estimatedCredits,expiresAt,saleItems:[{itemId,credits}]`，分项金额和必须等于总售价。每次报价和分项保存在独立SQLite表；同一请求的冻结售价不可覆盖。
 
@@ -35,3 +37,7 @@ API设计/服装/视频统一先调用 `POST /open/generation-quotes`，参数�
 也可以运行 `node tests/platform-preview.ts --sales`，在 3444 端口打开独立的模拟页面，直观查看售价流水与平台成本的区别。真实售价结算仍需在正式环境实际生成一次后核对。
 
 当前只检查批准时的余额，未预留并发额度；已经发生的合法售价扣款即使导致负余额也记录，之后阻止新批准。此限制沿用演示项目定位。
+
+## 无回调同步
+
+0.4.0 纯 API 可不配回调。后端按用户自适应从 `/open/events` 拉取并逐页处理售价扣退、成本及 API 终态结果；`api_event_cursors` 与 SDK 游标分离。原始事件与接收游标同事务落盘；账务/媒体处理另行标记成功，异常项持久保留并退避重试，不阻塞后续事件。接收游标不代表已结算，沿用原 eventId / settlementId 幂等与退款关联规则。服务关闭后不推进，下次启动恢复。SDK 回调和宿主批准责任保持。

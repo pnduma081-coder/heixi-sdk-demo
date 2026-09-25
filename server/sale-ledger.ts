@@ -103,28 +103,6 @@ export class SaleLedger {
       CREATE TABLE IF NOT EXISTS sale_settlements(settlement_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), quote_id TEXT NOT NULL, client_request_id TEXT NOT NULL, item_id TEXT NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>=0), original_debit_id TEXT, task_no TEXT NOT NULL, fact_digest TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
     `);
   }
-  prepareApiRequest(userId: string, requestId: string) {
-    const intent = this.store.db
-      .prepare(
-        "SELECT 1 FROM sale_request_intents WHERE user_id=? AND request_id=?",
-      )
-      .get(userId, requestId);
-    if (intent) return;
-    const prior = this.store.db
-      .prepare("SELECT response FROM requests WHERE user_id=? AND id=?")
-      .get(userId, requestId);
-    if (prior) {
-      if (!prior.response)
-        throw new AppError(
-          409,
-          "旧请求缺少商户售价确认，请先核对原请求状态，不能直接重提或补扣",
-        );
-      return; // 已受理旧请求只返回保存的响应，绝不重新生成或改价。
-    }
-    this.store.db
-      .prepare("INSERT INTO sale_request_intents VALUES(?,?)")
-      .run(userId, requestId);
-  }
   started(userId: string, quoteId: string) {
     return Boolean(
       this.store.db

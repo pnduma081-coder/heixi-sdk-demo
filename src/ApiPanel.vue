@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { examples } from "../shared/examples.ts";
 import type { JsonObject, RequestRecord, User } from "../shared/types.ts";
 import { api, message, pretty } from "./api.ts";
+import { submissionNumber } from "./api-test.ts";
+import { GenerationPoller } from "./generation-poller.ts";
+import {
+  imageCapability,
+  imageOptions,
+  videoOptions,
+} from "./model-options.ts";
 
 const props = defineProps<{
   user: User;
@@ -22,8 +29,8 @@ const models = ref<JsonObject[]>([]),
   assetTwo = ref("");
 const submissionNo = ref(""),
   polling = ref(false),
+  pollPaused = ref(false),
   lifetime = new AbortController();
-let timer: ReturnType<typeof setTimeout> | undefined;
 const asObject = (value: unknown): JsonObject =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
@@ -65,9 +72,9 @@ async function execute() {
       models.value = result;
       selectedModel.value = String(asObject(result[0]).id || "");
     }
-    const submission = asObject(asObject(result).submission);
-    if (typeof submission.submissionNo === "string") {
-      submissionNo.value = submission.submissionNo;
+    const no = submissionNumber(result);
+    if (no) {
+      submissionNo.value = no;
       startPolling();
     }
     emit("refresh");
@@ -100,16 +107,14 @@ async function fill() {
       selectedModel.value = String(model.id);
       params.modelId = model.id;
       params.parameterSchemaVersion = model.parameterSchemaVersion;
-      const capabilities = asObject(model.capabilities),
-        options = asObject(video ? capabilities.video : capabilities.image);
-      params.ratio =
-        first(video ? options.ratios : options.outputRatios) || params.ratio;
-      const resolution = first(
-        video ? options.resolutions : options.resolutionOptions,
-      );
-      if (resolution) params.resolution = resolution;
-      if (video) params.duration = String(first(options.durations) || "");
-      else {
+      const selected = video
+        ? videoOptions(asObject(asObject(model.capabilities).video), params)
+        : imageOptions(imageCapability(model, String(params.feature)), params);
+      delete params.resolution;
+      delete params.quality;
+      if (video) delete params.orientation;
+      Object.assign(params, selected);
+      if (!video) {
         params.sourceAssetIds = assetOne.value ? [assetOne.value] : [];
         params.sourceRoles = assetOne.value ? ["PRODUCT_MAIN"] : [];
       }
@@ -147,36 +152,50 @@ async function upload(event: Event) {
   });
   input.value = "";
 }
-async function readStatus() {
+const statusPoller = new GenerationPoller<JsonObject>({
+  read: async (no, signal) =>
+    asObject(
+      await api("/api/call", {
+        body: { operation: "generation", params: { submissionNo: no } },
+        userId: props.user.id,
+        signal: AbortSignal.any([lifetime.signal, signal]),
+      }),
+    ),
+  apply: (result) => {
+    response.value = pretty(result);
+    error.value = "";
+    if (result.terminal === true) emit("refresh");
+    return result.terminal === true;
+  },
+  error: (cause) => {
+    error.value = message(cause);
+  },
+  state: (state) => {
+    polling.value = state === "running";
+    pollPaused.value = state === "paused";
+  },
+  hidden: () => document.hidden,
+});
+function readStatus() {
   if (!submissionNo.value) throw new Error("请填写 GS 受理号");
-  const result = asObject(
-    await call("generation", { submissionNo: submissionNo.value }),
-  );
-  response.value = pretty(result);
-  emit("refresh");
-  if (result.terminal === true) stopPolling();
+  return statusPoller.refresh(submissionNo.value);
 }
 function stopPolling() {
-  polling.value = false;
-  clearTimeout(timer);
+  statusPoller.stop();
 }
 function startPolling() {
-  stopPolling();
-  polling.value = true;
-  const tick = async () => {
-    try {
-      await readStatus();
-    } catch (cause) {
-      if (!lifetime.signal.aborted) error.value = message(cause);
-      stopPolling();
-    }
-    if (polling.value && !lifetime.signal.aborted)
-      timer = setTimeout(tick, 3000);
-  };
-  timer = setTimeout(tick, 1000);
+  statusPoller.start(submissionNo.value);
 }
+function visibilityChanged() {
+  statusPoller.visibilityChanged();
+}
+watch(submissionNo, stopPolling, { flush: "sync" });
+onMounted(() =>
+  document.addEventListener("visibilitychange", visibilityChanged),
+);
 function restore(item: RequestRecord) {
   stopPolling();
+  submissionNo.value = submissionNumber(item.response);
   operation.value = item.operation;
   queueMicrotask(() => {
     editor.value = pretty(item.body);
@@ -185,12 +204,14 @@ function restore(item: RequestRecord) {
 }
 onBeforeUnmount(() => {
   lifetime.abort();
-  stopPolling();
+  statusPoller.dispose();
+  document.removeEventListener("visibilitychange", visibilityChanged);
 });
 </script>
 
 <template>
   <section>
+    <p class="hint">由商户后端直接调用生成接口，实际消耗由黑犀商户账户结算。</p>
     <div class="toolbar">
       <select v-model="operation" :disabled="busy" aria-label="API 示例"><option v-for="item in examples" :key="item.id" :value="item.id">{{ item.label }} · {{ item.method }}</option></select>
       <button :disabled="busy || !ready" @click="execute">调用 API</button><button :disabled="busy" @click="reset">重置模板</button><button :disabled="busy" @click="freshId">新请求号</button>
@@ -206,7 +227,8 @@ onBeforeUnmount(() => {
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <div class="two-columns"><label>请求 JSON<textarea v-model="editor" spellcheck="false" /></label><div>API 响应<pre class="response">{{ response || '等待调用' }}</pre></div></div>
     <div class="toolbar"><input v-model="submissionNo" placeholder="GS 受理号" aria-label="受理号" /><button :disabled="busy || !ready" @click="run(readStatus)">刷新最终状态</button><button :disabled="!ready" @click="polling ? stopPolling() : startPolling()">{{ polling ? '停止轮询' : '每 3 秒查询' }}</button></div>
-    <p class="hint">ACCEPTED / HANDED_OFF 表示受理或任务已创建；terminal=true 才是整次生成终态。结果文件在回调保存后出现在“我的作品”。</p>
+    <p class="hint">ACCEPTED / HANDED_OFF 表示受理或任务已创建；terminal=true 才是整次生成终态。结果文件在服务端轮询或可选回调保存后出现在“我的作品”。credits 为商户成本，不是用户售价。</p>
+    <p v-if="pollPaused" class="hint">自动查询已暂停（达到 10 分钟或连续失败 3 次），可手动刷新或重新开始查询。</p>
     <h3>已保存的生成请求</h3>
     <table><thead><tr><th>请求号</th><th>操作</th><th>提交状态</th><th></th></tr></thead><tbody><tr v-for="item in requests.filter(item => item.operation !== 'sdkApproval')" :key="item.id"><td>{{ item.id }}</td><td>{{ item.operation }}</td><td>{{ item.status }}</td><td><button :disabled="busy" @click="restore(item)">恢复原请求</button></td></tr></tbody></table>
   </section>

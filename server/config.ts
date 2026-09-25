@@ -7,6 +7,7 @@ import {
   sdkDocs,
 } from "../shared/sdk-release.ts";
 import type { DemoConfig } from "../shared/types.ts";
+import { validAccessKey, validSecretKey } from "./merchant-auth.ts";
 
 export const root = resolve(import.meta.dirname, "..");
 export const hostOrigin = "http://127.0.0.1:3443";
@@ -15,6 +16,7 @@ export const sdkApiOrigin = onlineApiOrigin;
 export type Config = {
   apiOrigin: string;
   apiKey: string;
+  accessKey?: string;
   public: DemoConfig;
   dataDir: string;
   listenOrigin?: string;
@@ -66,13 +68,31 @@ export function resolveConfig({
     exactOrigin(callbackOrigin, "Cloudflare 回调入口").protocol !== "https:"
   )
     throw new Error("Cloudflare 回调入口必须是 HTTPS origin");
-  const missing = env.BLACK_RHINO_API_KEY ? [] : ["BLACK_RHINO_API_KEY"];
+  const missing = ["BLACK_RHINO_API_KEY", "BLACK_RHINO_ACCESS_KEY"].filter(
+    (key) => !env[key],
+  );
   const configurationIssues = [];
   if (pageUrl.protocol !== "https:")
     configurationIssues.push(
       "当前页面为 HTTP；SDK 需要 HTTPS 页面入口。账户和 API 调试仍可使用。",
     );
-  const knownVariables = ["BLACK_RHINO_API_KEY", "BLACK_RHINO_HOST_ORIGIN"];
+  const invalidCredentials = [];
+  if (env.BLACK_RHINO_ACCESS_KEY && !validAccessKey(env.BLACK_RHINO_ACCESS_KEY))
+    invalidCredentials.push(
+      "BLACK_RHINO_ACCESS_KEY 格式错误：应为 ak- 加 32 位小写十六进制字符，不含空格或掩码。",
+    );
+  if (env.BLACK_RHINO_API_KEY && !validSecretKey(env.BLACK_RHINO_API_KEY))
+    invalidCredentials.push(
+      "BLACK_RHINO_API_KEY 格式错误：应为 sk- 加 43 位密钥字符，不含 Bearer、空格或掩码。",
+    );
+  configurationIssues.push(...invalidCredentials);
+  const credentialsReady =
+    missing.length === 0 && invalidCredentials.length === 0;
+  const knownVariables = [
+    "BLACK_RHINO_API_KEY",
+    "BLACK_RHINO_ACCESS_KEY",
+    "BLACK_RHINO_HOST_ORIGIN",
+  ];
   const ignored = Object.keys(env).filter(
     (name) => name.startsWith("BLACK_RHINO_") && !knownVariables.includes(name),
   );
@@ -87,13 +107,14 @@ export function resolveConfig({
   return {
     apiOrigin,
     apiKey: env.BLACK_RHINO_API_KEY || "",
+    accessKey: env.BLACK_RHINO_ACCESS_KEY || "",
     listenOrigin,
     dataDir: resolve(directory, ".local"),
     public: {
       apiOrigin,
       missing,
-      apiReady: missing.length === 0,
-      callbacksReady: missing.length === 0,
+      apiReady: credentialsReady,
+      callbacksReady: credentialsReady,
       sdkReady: true,
       hostOrigin: pageOrigin,
       sdkApiOrigin,

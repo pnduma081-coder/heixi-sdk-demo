@@ -13,7 +13,12 @@ import {
 import { startDemo } from "../server/index.ts";
 
 const useHttps = process.argv.includes("--https");
-const hostOrigin = useHttps ? httpsHostOrigin : httpOrigin;
+const portArgument = process.argv.find((arg) => arg.startsWith("--port="));
+const testPort = portArgument ? Number(portArgument.slice(7)) : 3443;
+if (!Number.isInteger(testPort) || testPort < 1024 || testPort > 65535)
+  throw new Error("测试端口必须为 1024–65535 的整数");
+const hostOrigin = new URL(useHttps ? httpsHostOrigin : httpOrigin);
+hostOrigin.port = String(testPort);
 const get = useHttps ? httpsGet : httpGet;
 
 // 浏览器验收只使用本次新建的临时库、证书和空凭证，不加载真实环境文件。
@@ -40,10 +45,10 @@ if (useHttps)
     ],
     { stdio: "ignore" },
   );
-const server = await startDemo(
-  resolveConfig({ https: useHttps, directory }),
-  directory,
-);
+const config = resolveConfig({ https: useHttps, directory });
+config.listenOrigin = hostOrigin.origin;
+config.public.hostOrigin = hostOrigin.origin;
+const server = await startDemo(config, directory);
 if (process.argv.includes("--verify")) {
   try {
     for (const path of [
@@ -70,7 +75,7 @@ if (process.argv.includes("--verify")) {
       const status = await new Promise<number | undefined>(
         (resolve, reject) => {
           get(
-            hostOrigin + path,
+            hostOrigin.origin + path,
             {
               ...(useHttps
                 ? { ca: readFileSync(join(directory, "cert.pem")) }

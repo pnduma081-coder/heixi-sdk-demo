@@ -2,18 +2,10 @@ import type { ConnectionReport } from "../shared/types.ts";
 import { hostOrigin as defaultHostOrigin } from "./config.ts";
 import { AppError, object, string } from "./errors.ts";
 import type { MerchantClient } from "./merchant.ts";
+import { merchantHeaders, validSecretKey } from "./merchant-auth.ts";
 
 function isUnauthorized(error: unknown): error is AppError {
-  return (
-    error instanceof AppError &&
-    (error.status === 401 ||
-      Boolean(
-        error.details &&
-          typeof error.details === "object" &&
-          "code" in error.details &&
-          error.details.code === 40100,
-      ))
-  );
+  return error instanceof AppError && error.status === 401;
 }
 
 function requireSdkOrigin(origin: string) {
@@ -36,12 +28,22 @@ export async function checkConnection(
     parentOrigin: hostOrigin,
     checks: [],
   };
-  if (!/^sk-[A-Za-z0-9_-]{43}$/.test(api.key)) {
+  if (!validSecretKey(api.key)) {
     report.checks.push({
       name: "商户 Key 格式",
       status: "failed",
       message:
         "请在本项目 .env.local填写完整商户 API Key（sk- 开头，共 46 个字符），不要附加 Bearer、空格、掩码或换行；保存后重启本项目。",
+    });
+    return report;
+  }
+  try {
+    merchantHeaders(api.key, api.auth);
+  } catch (error) {
+    report.checks.push({
+      name: "商户 AK / 协议配置",
+      status: "failed",
+      message: error instanceof AppError ? error.message : "商户协议配置无效",
     });
     return report;
   }
@@ -51,7 +53,9 @@ export async function checkConnection(
       run: () => api.request("/open/history", userId, { timeoutMs: 5000 }),
       success: "当前服务端 Key 已通过商户 API 请求。",
       unauthorized:
-        "当前 API 服务拒绝此商户凭证。请检查完整 Key 是否属于下方 API 所在环境、是否已撤销，以及商户、所属会员与站点是否启用；修改 Key 后须重启本项目。",
+        api.auth.version === "0.4.0"
+          ? "当前 API 服务拒绝此商户凭证。请检查 AK/SK 是否匹配、完整 Key 是否属于下方 API 所在环境、是否已撤销，以及商户、所属会员与站点是否启用；修改 Key 后须重启本项目。"
+          : "旧版 API 的 401 也可能表示缺少 externalUserId 或功能授权。请结合安全详情核对商户凭证、参数与授权，不能只据此判断 Key 已失效。",
     },
     {
       name: "SDK 启动授权",

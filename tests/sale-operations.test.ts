@@ -15,7 +15,7 @@ function priced(userId: string, requestId: string, credits = 35) {
     saleItems: [{ itemId: randomUUID(), credits }],
   };
 }
-test("API freezes sale before approve/submit and timeout after debit restores original quote without repricing", async () => {
+test("historical API quote retries reuse its saved price and never switch to direct generation", async () => {
   const store = new Store(":memory:");
   const user = store.user("demo-b"),
     body = { clientRequestId: randomUUID(), prompt: "fixture" };
@@ -32,9 +32,7 @@ test("API freezes sale before approve/submit and timeout after debit restores or
       assert.equal(params.externalUserId, user.externalUserId);
       if (path === "/api/v1/open/generation-quotes") {
         quoteReads++;
-        assert.equal(params.path, "/open/design-jobs");
-        assert.deepEqual(params.input, body);
-        return Response.json({ code: 0, data: q });
+        assert.fail("historical recovery must not create a quote");
       }
       assert.equal(
         store.sales.quote(user.id, body.clientRequestId)?.estimatedCredits,
@@ -72,6 +70,11 @@ test("API freezes sale before approve/submit and timeout after debit restores or
   );
   try {
     store.addCredit(user.id, 35, randomUUID());
+    store.db
+      .prepare("INSERT INTO api_request_modes VALUES(?,?,?)")
+      .run(user.id, body.clientRequestId, "quote");
+    store.startRequest(user.id, body.clientRequestId, "design", body);
+    store.sales.freeze(user, q);
     const ops = new Operations(api, store);
     await assert.rejects(
       () => ops.call(user, "design", body),
@@ -82,7 +85,7 @@ test("API freezes sale before approve/submit and timeout after debit restores or
     await ops.call(user, "design", body);
     assert.deepEqual(
       { quoteReads, submits, approvals },
-      { quoteReads: 1, submits: 2, approvals: 2 },
+      { quoteReads: 0, submits: 2, approvals: 2 },
     );
     assert.equal(
       store.ledger(user.id).filter((row) => row.kind === "SALE_DEBIT").length,
@@ -93,7 +96,7 @@ test("API freezes sale before approve/submit and timeout after debit restores or
   }
 });
 
-test("all API generation operations use the quote chain and zero sale can be confirmed with zero balance", async () => {
+test("all new API generation operations submit directly with zero user balance and never create quotes", async () => {
   for (const [operation, path] of [
     ["design", "/open/design-jobs"],
     ["apparel", "/open/apparel-workflows"],
@@ -101,85 +104,54 @@ test("all API generation operations use the quote chain and zero sale can be con
   ]) {
     const store = new Store(":memory:");
     const user = store.user("demo-a"),
-      q = priced(user.externalUserId, randomUUID(), 0),
+      id = randomUUID(),
       calls: string[] = [];
     try {
       const api = new MerchantClient(
         "https://fixture.invalid",
         "fixture-key",
         async (url, options) => {
-          const pathname = new URL(String(url)).pathname,
-            body = JSON.parse(String(options?.body));
+          const pathname = new URL(String(url)).pathname;
+          const body = JSON.parse(String(options?.body));
           calls.push(pathname);
-          if (pathname.endsWith("/generation-quotes")) {
-            assert.equal(body.path, path);
-            return Response.json({ code: 0, data: q });
-          }
-          if (pathname.endsWith("/approve")) {
-            assert.equal(body.estimatedCredits, 0);
-            return Response.json({ code: 0, data: { approvalId: q.quoteId } });
-          }
-          assert(pathname.endsWith("/submit"));
+          assert.equal(pathname, `/api/v1${path}`);
+          assert.equal(body.externalUserId, user.externalUserId);
+          assert.equal(body.clientRequestId, id);
           return Response.json({
             code: 0,
             data: { submission: { submissionNo: "GSfixture" } },
           });
         },
+        { version: "0.4.0", accessKey: `ak-${"a".repeat(32)}` },
       );
       await new Operations(api, store).call(user, operation, {
-        clientRequestId: q.clientRequestId,
+        clientRequestId: id,
       });
-      assert.equal(calls.length, 3);
+      assert.equal(calls.length, 1);
       assert.equal(store.user(user.id).credits, 0);
+      assert.equal(store.sales.quote(user.id, id), undefined);
+      assert.equal(
+        store.db
+          .prepare("SELECT COUNT(*) AS count FROM sale_request_intents")
+          .get()?.count,
+        0,
+      );
     } finally {
       store.close();
     }
   }
 });
 
-test("missing pricing support, insufficient sale balance and legacy uncertain requests never fall back to direct generation", async () => {
+test("ambiguous legacy requests cannot resubmit, completed responses remain readable and old SDK approvals require snapshots", async () => {
   const store = new Store(":memory:");
   const user = store.user("demo-b");
-  let mode = "missing",
-    calls = 0;
   const api = new MerchantClient(
     "https://fixture.invalid",
     "fixture-key",
-    async (input, options) => {
-      calls++;
-      assert.equal(
-        new URL(String(input)).pathname,
-        "/api/v1/open/generation-quotes",
-      );
-      if (mode === "missing")
-        return Response.json(
-          { code: 404, message: "missing" },
-          { status: 404 },
-        );
-      const body = JSON.parse(String(options?.body)),
-        q = priced(user.externalUserId, body.input.clientRequestId);
-      return Response.json({
-        code: 0,
-        data: mode === "incomplete" ? { ...q, saleItems: undefined } : q,
-      });
-    },
+    async () => assert.fail("must not send a new generation"),
   );
   try {
     const ops = new Operations(api, store);
-    await assert.rejects(
-      () => ops.call(user, "design", { clientRequestId: randomUUID() }),
-      /尚未提供/,
-    );
-    mode = "incomplete";
-    await assert.rejects(
-      () => ops.call(user, "design", { clientRequestId: randomUUID() }),
-      /完整的商户售价/,
-    );
-    mode = "insufficient";
-    await assert.rejects(
-      () => ops.call(user, "design", { clientRequestId: randomUUID() }),
-      /算力不足/,
-    );
     const legacy = { clientRequestId: randomUUID() };
     store.startRequest(user.id, legacy.clientRequestId, "design", legacy);
     await assert.rejects(() => ops.call(user, "design", legacy), /旧请求缺少/);
@@ -192,13 +164,26 @@ test("missing pricing support, insufficient sale balance and legacy uncertain re
     assert.deepEqual(await ops.call(user, "design", legacy), {
       submission: { submissionNo: "GSlegacy" },
     });
+    const unfinished = { clientRequestId: randomUUID() };
+    store.db
+      .prepare("INSERT INTO sale_request_intents VALUES(?,?)")
+      .run(user.id, unfinished.clientRequestId);
+    store.startRequest(
+      user.id,
+      unfinished.clientRequestId,
+      "design",
+      unfinished,
+    );
+    await assert.rejects(
+      () => ops.call(user, "design", unfinished),
+      /旧报价请求缺少冻结快照/,
+    );
     const sdkId = randomUUID(),
       sdkQuote = randomUUID(),
       sdkBody = { quoteId: sdkQuote, clientRequestId: sdkId };
     store.startRequest(user.id, sdkId, "sdkApproval", sdkBody);
     store.finishRequest(user.id, sdkId, { approvalId: sdkQuote }, "APPROVED");
     await assert.rejects(() => ops.approve(user, sdkBody), /旧批准缺少/);
-    assert.equal(calls, 3);
     assert.equal(store.user(user.id).credits, 0);
   } finally {
     store.close();

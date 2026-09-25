@@ -163,36 +163,24 @@ test("session switches invalidate old token and request approval never debits tw
 test("API retries preserve request identity after uncertain transport and reject changed input", async () => {
   const store = new Store(":memory:");
   let calls = 0;
-  const quoteId = randomUUID(),
-    itemId = randomUUID();
   try {
     const client = new MerchantClient(
       "https://fixture.example",
       "fixture-key",
       async (input, options) => {
         const path = new URL(String(input)).pathname;
-        const request = JSON.parse(String(options?.body));
-        if (path.endsWith("/generation-quotes"))
-          return Response.json({
-            code: 0,
-            data: {
-              quoteId,
-              clientRequestId: request.input.clientRequestId,
-              externalUserId: request.externalUserId,
-              estimatedCredits: 0,
-              expiresAt: new Date(Date.now() + 300000).toISOString(),
-              saleItems: [{ itemId, credits: 0 }],
-            },
-          });
-        if (path.endsWith("/approve"))
-          return Response.json({ code: 0, data: { approvalId: quoteId } });
-        assert(path.endsWith("/submit"));
+        assert.equal(path, "/api/v1/open/video-workflows");
+        assert.equal(
+          JSON.parse(String(options?.body)).externalUserId,
+          "demo-user-a",
+        );
         if (++calls === 1) throw new Error("timeout");
         return Response.json({
           code: 0,
           data: { submission: { submissionNo: "GSfixture" } },
         });
       },
+      { version: "0.4.0", accessKey: `ak-${"a".repeat(32)}` },
     );
     const operations = new Operations(client, store),
       user = store.user("demo-a"),

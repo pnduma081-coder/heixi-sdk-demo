@@ -10,7 +10,9 @@ import {
 } from "node:https";
 import { resolve } from "node:path";
 import { createServer as createViteServer } from "vite";
+import { onlineSdkVersion } from "../shared/sdk-release.ts";
 import { type Config, loadConfig, root } from "./config.ts";
+import { EventPoller } from "./event-poller.ts";
 import { createHandler, errorResponse } from "./http.ts";
 import { MediaStore } from "./media.ts";
 import { MerchantClient } from "./merchant.ts";
@@ -60,7 +62,10 @@ export async function startDemo(
   if (useHttps && (!existsSync(cert) || !existsSync(key)))
     throw new Error("请先运行 pnpm setup:local 准备本地证书");
   const store = new Store(resolve(config.dataDir, "demo.sqlite"));
-  const api = new MerchantClient(config.apiOrigin, config.apiKey);
+  const api = new MerchantClient(config.apiOrigin, config.apiKey, fetch, {
+    version: onlineSdkVersion,
+    accessKey: config.accessKey,
+  });
   const results = new ResultService(
     store,
     api,
@@ -112,15 +117,31 @@ export async function startDemo(
         console.info(
           config.public.missing.length
             ? `待填写配置：${config.public.missing.join(", ")}`
-            : "API Key已提供；回调验签配置由服务端按需自动获取",
+            : config.public.apiReady
+              ? "AK/SK 格式有效；API 事件由服务端轮询，SDK 回调仍须配置"
+              : "AK/SK 格式无效，API 调用与后台同步未启用",
         );
       },
     );
   });
   let stopping = false;
+  const poller = new EventPoller(
+    () => results.syncState.users(),
+    (user) => results.syncEvents(user),
+    Date.now,
+    (userId) => results.syncState.active(userId),
+  );
+  results.onActivity = (userId) => poller.wake(userId);
+  const pollTimer = config.public.apiReady
+    ? setInterval(() => {
+        void poller.tick();
+      }, 1000)
+    : undefined;
   async function stop() {
     if (stopping) return;
     stopping = true;
+    clearInterval(pollTimer);
+    await poller.stop();
     await vite.close();
     await new Promise<void>((resolve) => {
       server.close(() => resolve());

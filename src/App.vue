@@ -12,6 +12,7 @@ import {
   usePage,
 } from "./navigation.ts";
 import PagePlaceholder from "./PagePlaceholder.vue";
+import { SessionRefresh } from "./session-refresh.ts";
 
 const config = ref<DemoConfig>(),
   session = ref<SessionState>(),
@@ -26,16 +27,19 @@ const page = usePage(),
 const subtools = computed(() =>
   tools.filter((tool) => tool.group === page.value.group),
 );
-let timer: ReturnType<typeof setTimeout> | undefined,
-  generation = 0,
+let generation = 0,
   topupId = crypto.randomUUID();
 const lifetime = new AbortController();
-async function refresh() {
+const sessionRefresh = new SessionRefresh(async () => {
   const version = generation;
   const state = await api<SessionState>("/api/session", {
-    signal: lifetime.signal,
+    signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(15000)]),
   });
-  if (version === generation && !lifetime.signal.aborted) session.value = state;
+  if (version !== generation || lifetime.signal.aborted) return;
+  session.value = state;
+});
+function refresh() {
+  return sessionRefresh.refresh();
 }
 function requestRefresh() {
   void refresh().catch((cause) => {
@@ -121,27 +125,24 @@ watch(
     mobileMenu.value = false;
     error.value = "";
     document.title = `${page.value.title} · 黑犀创作平台`;
+    // 进入本地数据页时读取一次，后台完成的结果也可通过手动刷新查看。
+    if (
+      session.value &&
+      config.value &&
+      !switching.value &&
+      !page.value.sdkPage
+    )
+      requestRefresh();
   },
 );
 onMounted(async () => {
   document.addEventListener("keydown", handleEscape);
   document.title = `${page.value.title} · 黑犀创作平台`;
   await run(initialize);
-  const tick = async () => {
-    if (!switching.value) {
-      try {
-        await refresh();
-      } catch {
-        /* 自动余额刷新不切换页面或覆盖当前操作。 */
-      }
-    }
-    if (!lifetime.signal.aborted) timer = setTimeout(tick, 3000);
-  };
-  timer = setTimeout(tick, 3000);
 });
 onBeforeUnmount(() => {
+  sessionRefresh.stop();
   lifetime.abort();
-  clearTimeout(timer);
   document.removeEventListener("keydown", handleEscape);
 });
 </script>
@@ -158,7 +159,7 @@ onBeforeUnmount(() => {
       <div class="sidebar-foot"><span class="status-dot"></span>本地创作平台</div>
     </aside>
     <div class="platform-body">
-      <header class="platform-topbar"><div class="page-breadcrumb"><button class="icon-button mobile-menu-toggle" aria-label="展开导航" @click="mobileMenu = !mobileMenu"><Icon name="menu" /></button><span>{{ page.sdkPage || page.section === 'api-test' ? '创作工作台' : '我的空间' }}</span><Icon name="chevron" /><strong>{{ page.title }}</strong></div><div v-if="session" class="account-actions"><button class="credit-balance" @click="openTopup"><Icon name="wallet" /><strong>{{ session.user.credits.toLocaleString() }}</strong><span>算力</span><span class="recharge-label">充值</span></button><span class="topbar-divider"></span><span class="avatar">{{ session.user.name.slice(-1) }}</span><select :value="session.user.id" :disabled="busy" aria-label="当前用户" @change="chooseUser"><option v-for="user in session.users" :key="user.id" :value="user.id">{{ user.name }}</option></select></div></header>
+      <header class="platform-topbar"><div class="page-breadcrumb"><button class="icon-button mobile-menu-toggle" aria-label="展开导航" @click="mobileMenu = !mobileMenu"><Icon name="menu" /></button><span>{{ page.sdkPage || page.section === 'api-test' ? '创作工作台' : '我的空间' }}</span><Icon name="chevron" /><strong>{{ page.title }}</strong></div><div v-if="session" class="account-actions"><button class="icon-button" aria-label="刷新账户数据" title="刷新账户数据" :disabled="busy || switching" @click="run(refresh)"><Icon name="refresh" /></button><button class="credit-balance" @click="openTopup"><Icon name="wallet" /><strong>{{ session.user.credits.toLocaleString() }}</strong><span>算力</span><span class="recharge-label">充值</span></button><span class="topbar-divider"></span><span class="avatar">{{ session.user.name.slice(-1) }}</span><select :value="session.user.id" :disabled="busy" aria-label="当前用户" @change="chooseUser"><option v-for="user in session.users" :key="user.id" :value="user.id">{{ user.name }}</option></select></div></header>
       <div v-if="error" class="app-alert" role="alert"><Icon name="warning" /><span>{{ error }}</span><button class="icon-button" aria-label="关闭提示" @click="error = ''"><Icon name="close" /></button></div>
       <main class="platform-main" :class="{ 'platform-main--creation': page.sdkPage }">
         <div v-if="page.sdkPage && subtools.length > 1" class="tool-tabs" :aria-label="`${page.title}功能导航`"><RouterLink v-for="tool in subtools" :key="tool.page" :to="tool.path" :class="{ active: page.sdkPage === tool.page }">{{ tool.title }}</RouterLink></div>
