@@ -105,7 +105,11 @@ export class MerchantClient {
               ? "请求未被接受，请核对参数或业务条件，并查看安全错误详情与 traceId"
               : "黑犀 API 调用失败",
         details,
-        response.status >= 400 && response.status < 500
+        // A timeout/rate-limit or contradictory/malformed envelope is not proof
+        // that the platform did not accept the operation.
+        [400, 401, 403, 404, 409, 422].includes(response.status) &&
+          Number.isSafeInteger(envelope.code) &&
+          Number(envelope.code) > 0
           ? "UPSTREAM_REJECTED"
           : undefined,
       );

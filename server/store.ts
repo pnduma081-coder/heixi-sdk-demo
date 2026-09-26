@@ -428,9 +428,11 @@ export class Store {
     return undefined;
   }
   finishRequest(userId: string, id: string, response: unknown, status: string) {
+    // Concurrent retries may finish out of order, including across processes.
+    // Once an accepted response is durable, a late failure cannot erase it.
     this.db
       .prepare(
-        "UPDATE requests SET response=?,status=? WHERE user_id=? AND id=?",
+        "UPDATE requests SET response=?,status=? WHERE user_id=? AND id=? AND response IS NULL",
       )
       .run(
         response === undefined ? null : JSON.stringify(response),

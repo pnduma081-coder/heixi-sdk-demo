@@ -333,3 +333,122 @@ test("same-quote concurrent attempts cannot release another attempt's in-flight 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("timeouts, throttling and invalid rejection envelopes retain the reservation", async () => {
+  for (const [status, envelope] of [
+    [408, { code: 40800 }],
+    [429, { code: 42900 }],
+    [502, { code: 50200 }],
+    [409, { code: 0 }],
+    [409, { message: "refused without code" }],
+    [409, { code: "40900" }],
+    [200, { code: 40900 }],
+  ] as const) {
+    const store = new Store(":memory:");
+    try {
+      store.addCredit("demo-a", 100, randomUUID());
+      const q = quote(store);
+      const client = new MerchantClient(
+        "https://fixture.invalid",
+        "fixture-key",
+        async (url) =>
+          Response.json(
+            String(url).endsWith("/approve") ? envelope : { code: 0, data: q },
+            { status: String(url).endsWith("/approve") ? status : 200 },
+          ),
+      );
+      await assert.rejects(() =>
+        new Operations(client, store).approve(store.user("demo-a"), q),
+      );
+      assert.equal(
+        store.sales.held("demo-a"),
+        60,
+        `HTTP ${status} ${JSON.stringify(envelope)}`,
+      );
+    } finally {
+      store.close();
+    }
+  }
+});
+
+test("legacy approval stays reserved when the later submit is explicitly rejected", async () => {
+  const store = new Store(":memory:");
+  try {
+    store.addCredit("demo-a", 100, randomUUID());
+    const q = quote(store);
+    const body = { clientRequestId: q.clientRequestId };
+    store.db
+      .prepare("INSERT INTO api_request_modes VALUES(?,?,'quote')")
+      .run("demo-a", q.clientRequestId);
+    store.startRequest("demo-a", q.clientRequestId, "design", body);
+    store.sales.freeze(store.user("demo-a"), q);
+    const client = new MerchantClient(
+      "https://fixture.invalid",
+      "fixture-key",
+      async (url) =>
+        String(url).endsWith("/approve")
+          ? Response.json({ code: 0, data: { approvalId: q.quoteId } })
+          : Response.json({ code: 40900 }, { status: 409 }),
+    );
+    await assert.rejects(() =>
+      new Operations(client, store).call(store.user("demo-a"), "design", body),
+    );
+    assert.equal(store.sales.held("demo-a"), 60);
+    assert.equal(
+      store.db
+        .prepare(
+          "SELECT status FROM sale_reservation_attempts WHERE quote_id=?",
+        )
+        .get(q.quoteId)?.status,
+      "ACCEPTED",
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("a late failed concurrent retry cannot erase a durable successful submission", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rhino-accepted-retry-"));
+  const path = join(dir, "test.sqlite");
+  const a = new Store(path),
+    b = new Store(path);
+  try {
+    const id = randomUUID();
+    const body = { clientRequestId: id };
+    let rejectLate!: () => void;
+    let calls = 0;
+    const accepted = { submission: { submissionNo: "GS-preserved" } };
+    const client = new MerchantClient(
+      "https://fixture.invalid",
+      "fixture-key",
+      async () => {
+        if (++calls === 1)
+          return new Promise((_, reject) => {
+            rejectLate = () => reject(Error("late timeout"));
+          });
+        return Response.json({ code: 0, data: accepted });
+      },
+      { version: "0.4.0", accessKey: `ak-${"a".repeat(32)}` },
+    );
+    const early = new Operations(client, a).call(
+      a.user("demo-a"),
+      "design",
+      body,
+    );
+    const rejected = assert.rejects(early);
+    await new Operations(client, b).call(b.user("demo-a"), "design", body);
+    rejectLate();
+    await rejected;
+    assert.equal(a.requests("demo-a")[0].status, "ACCEPTED");
+    assert.deepEqual(a.requests("demo-a")[0].response, accepted);
+    assert.deepEqual(
+      await new Operations(client, a).call(a.user("demo-a"), "design", body),
+      accepted,
+    );
+    assert.equal(calls, 2);
+  } finally {
+    a.close();
+    b.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

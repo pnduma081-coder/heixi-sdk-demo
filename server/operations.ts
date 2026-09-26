@@ -88,8 +88,8 @@ export class Operations {
           409,
           "旧报价请求缺少冻结快照，请先核对原受理状态，不能改用直接生成重提",
         );
-      return this.store.sales.withReservation(user, quote, async () => {
-        await this.api.request(
+      await this.store.sales.withReservation(user, quote, () =>
+        this.api.request(
           `/open/generation-quotes/${quote.quoteId}/approve`,
           user.externalUserId,
           {
@@ -98,13 +98,15 @@ export class Operations {
               estimatedCredits: quote.estimatedCredits,
             },
           },
-        );
-        return this.api.request(
-          `/open/generation-quotes/${quote.quoteId}/submit`,
-          user.externalUserId,
-          { body: {} },
-        );
-      });
+        ),
+      );
+      // The approval is already durable. A later submit failure must never
+      // rewrite it as a rejected approval or release its reservation.
+      return this.api.request(
+        `/open/generation-quotes/${quote.quoteId}/submit`,
+        user.externalUserId,
+        { body: {} },
+      );
     });
   }
   private confirmQuote(
