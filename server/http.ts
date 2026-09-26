@@ -1,9 +1,9 @@
-import { createReadStream } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import { checkConnection, sdkSignature } from "./connection.ts";
 import { AppError, BusinessError, object, string, uuid } from "./errors.ts";
+import { sendFile } from "./file-response.ts";
 import type { MerchantClient } from "./merchant.ts";
 import type { Operations } from "./operations.ts";
 import type { ResultService } from "./results.ts";
@@ -113,7 +113,12 @@ export function createHandler(
       const pageOrigin =
         pageOrigins.find((item) => new URL(item).host === req.headers.host) ||
         hostOrigin;
-      if (req.method !== "GET" && req.headers.origin !== pageOrigin)
+      const fileHead = req.method === "HEAD" && path.startsWith("/files/");
+      if (
+        req.method !== "GET" &&
+        !fileHead &&
+        req.headers.origin !== pageOrigin
+      )
         throw new AppError(403, "请求来源不匹配");
       if (path === "/api/config" && req.method === "GET") {
         json(res, config.public);
@@ -152,22 +157,14 @@ export function createHandler(
       const expectedUser = req.headers["x-demo-user"];
       if (expectedUser !== undefined && expectedUser !== user.id)
         throw new AppError(409, "用户已切换，请重新操作");
-      if (req.method === "GET") {
+      if (req.method === "GET" || fileHead) {
         if (path === "/api/sdk/state")
           json(res, { resultCursor: store.cursor(user.id) || null });
         else if (path.startsWith("/files/")) {
           const id = path.slice(7);
           if (!/^[a-f0-9]{64}$/.test(id)) throw new AppError(404, "文件不存在");
           const file = store.file(user.id, id);
-          res.writeHead(200, {
-            "Content-Type": file.contentType,
-            "Content-Length": file.bytes,
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-          });
-          const stream = createReadStream(join(config.dataDir, "media", id));
-          stream.on("error", () => res.destroy());
-          stream.pipe(res);
+          sendFile(req, res, join(config.dataDir, "media", id), file);
         } else throw new AppError(404, "接口不存在");
         return true;
       }
