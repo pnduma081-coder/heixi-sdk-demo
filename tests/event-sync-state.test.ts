@@ -89,6 +89,7 @@ test("a long-running task keeps short polling even when no new events arrive", a
       { submissionNo: "GS-one" },
       "ACCEPTED",
     );
+    poller.wake("demo-a");
     for (let i = 0; i < 80; i++) {
       await poller.tick();
       now += 5000;

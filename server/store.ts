@@ -44,6 +44,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS ledger(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, delta INTEGER NOT NULL, balance INTEGER NOT NULL, reference TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(user_id, kind, reference));
       CREATE TABLE IF NOT EXISTS events(event_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), digest TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, reference TEXT NOT NULL, submission_no TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, files TEXT NOT NULL, receipt_id TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(source, reference));
+      CREATE INDEX IF NOT EXISTS results_submission_owner ON results(user_id,submission_no,source);
       CREATE TABLE IF NOT EXISTS requests(id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id), operation TEXT NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL, response TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(user_id,id));
       CREATE TABLE IF NOT EXISTS platform_credit_events(event_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, delta INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cursors(user_id TEXT PRIMARY KEY REFERENCES users(id), event_id TEXT NOT NULL);
@@ -368,6 +369,14 @@ export class Store {
       receiptId: String(row.receipt_id),
       createdAt: String(row.created_at),
     };
+  }
+  resultForSubmission(userId: string, submissionNo: string) {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM results WHERE user_id=? AND submission_no=? AND source='API' ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(userId, submissionNo);
+    return row ? this.presentResult(row) : undefined;
   }
   results(userId: string) {
     return this.db

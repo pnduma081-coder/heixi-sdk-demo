@@ -130,6 +130,7 @@ export async function startDemo(
     (user) => results.syncEvents(user),
     Date.now,
     (userId) => results.syncState.active(userId),
+    (userId) => store.user(userId),
   );
   results.onActivity = (userId) => poller.wake(userId);
   const pollTimer = config.public.apiReady

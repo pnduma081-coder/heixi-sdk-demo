@@ -10,12 +10,16 @@ export class GenerationPoller<T> {
     error: (cause: unknown) => void;
     state: (state: PollingState) => void;
     hidden: () => boolean;
+    maxElapsedMs?: number;
+    maxReads?: number;
+    intervalMs?: number;
   };
   private key = "";
   private mode: PollingState = "idle";
   private revision = 0;
   private startedAt = 0;
   private failures = 0;
+  private reads = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private controller: AbortController | undefined;
   private pending: { revision: number; promise: Promise<void> } | undefined;
@@ -30,6 +34,7 @@ export class GenerationPoller<T> {
     this.key = submissionNo;
     this.startedAt = Date.now();
     this.failures = 0;
+    this.reads = 0;
     this.setState("running");
     if (!this.options.hidden()) void this.run(this.revision);
   }
@@ -72,7 +77,11 @@ export class GenerationPoller<T> {
       // 取消请求收尾后才查询新任务；旧响应无法更新新任务或再启动定时器。
       return this.pending.promise.then(() => this.run(revision));
     }
-    if (this.mode === "running" && Date.now() - this.startedAt >= 600_000) {
+    if (
+      this.mode === "running" &&
+      (Date.now() - this.startedAt >= (this.options.maxElapsedMs ?? 600_000) ||
+        this.reads >= (this.options.maxReads ?? Infinity))
+    ) {
       this.setState("paused");
       return Promise.resolve();
     }
@@ -84,6 +93,7 @@ export class GenerationPoller<T> {
       .then(async () => {
         if (!current()) return;
         try {
+          this.reads++;
           const value = await this.options.read(
             key,
             AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
@@ -109,7 +119,10 @@ export class GenerationPoller<T> {
       .finally(() => {
         this.pending = undefined;
         if (current() && this.mode === "running" && !this.options.hidden())
-          this.timer = setTimeout(() => void this.run(revision), 3000);
+          this.timer = setTimeout(
+            () => void this.run(revision),
+            this.options.intervalMs ?? 3000,
+          );
       });
     this.pending = { revision, promise };
     return promise;

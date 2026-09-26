@@ -89,8 +89,8 @@ export class ResultService {
         await this.processEvent(user, item.value);
         this.inbox.complete(user.id, item.key);
         processed++;
-      } catch {
-        this.inbox.failed(user.id, item.key, item.attempts, Date.now());
+      } catch (cause) {
+        this.inbox.failed(user.id, item.key, item.attempts, Date.now(), cause);
       }
     }
     if (fetchError) throw fetchError;

@@ -10,6 +10,7 @@ import {
   imageOptions,
   videoOptions,
 } from "./model-options.ts";
+import { ResultWatcher } from "./result-watcher.ts";
 
 const props = defineProps<{
   user: User;
@@ -152,6 +153,17 @@ async function upload(event: Event) {
   });
   input.value = "";
 }
+const savingState = ref("idle");
+const resultWatcher = new ResultWatcher({
+  userId: props.user.id,
+  saved: () => emit("refresh"),
+  state: (state) => {
+    savingState.value = state;
+  },
+  error: (cause) => {
+    error.value = message(cause);
+  },
+});
 const statusPoller = new GenerationPoller<JsonObject>({
   read: async (no, signal) =>
     asObject(
@@ -164,7 +176,7 @@ const statusPoller = new GenerationPoller<JsonObject>({
   apply: (result) => {
     response.value = pretty(result);
     error.value = "";
-    if (result.terminal === true) emit("refresh");
+    if (result.terminal === true) resultWatcher.start(submissionNo.value);
     return result.terminal === true;
   },
   error: (cause) => {
@@ -178,9 +190,11 @@ const statusPoller = new GenerationPoller<JsonObject>({
 });
 function readStatus() {
   if (!submissionNo.value) throw new Error("请填写 GS 受理号");
+  if (savingState.value === "paused") resultWatcher.stop();
   return statusPoller.refresh(submissionNo.value);
 }
 function stopPolling() {
+  resultWatcher.stop();
   statusPoller.stop();
 }
 function startPolling() {
@@ -188,6 +202,7 @@ function startPolling() {
 }
 function visibilityChanged() {
   statusPoller.visibilityChanged();
+  resultWatcher.visibilityChanged();
 }
 watch(submissionNo, stopPolling, { flush: "sync" });
 onMounted(() =>
@@ -205,6 +220,7 @@ function restore(item: RequestRecord) {
 onBeforeUnmount(() => {
   lifetime.abort();
   statusPoller.dispose();
+  resultWatcher.dispose();
   document.removeEventListener("visibilitychange", visibilityChanged);
 });
 </script>
@@ -228,6 +244,9 @@ onBeforeUnmount(() => {
     <div class="two-columns"><label>请求 JSON<textarea v-model="editor" spellcheck="false" /></label><div>API 响应<pre class="response">{{ response || '等待调用' }}</pre></div></div>
     <div class="toolbar"><input v-model="submissionNo" placeholder="GS 受理号" aria-label="受理号" /><button :disabled="busy || !ready" @click="run(readStatus)">刷新最终状态</button><button :disabled="!ready" @click="polling ? stopPolling() : startPolling()">{{ polling ? '停止轮询' : '每 3 秒查询' }}</button></div>
     <p class="hint">ACCEPTED / HANDED_OFF 表示受理或任务已创建；terminal=true 才是整次生成终态。结果文件在服务端轮询或可选回调保存后出现在“我的作品”。credits 为商户成本，不是用户售价。</p>
+    <p v-if="savingState === 'running'" class="hint">平台已完成，正在等待本地保存结果。</p>
+    <p v-if="savingState === 'complete'" class="hint">结果已保存，可在“我的作品”查看。</p>
+    <p v-if="savingState === 'paused'" class="hint">保存状态自动检查已暂停，后台仍继续处理；可手动刷新最终状态。</p>
     <p v-if="pollPaused" class="hint">自动查询已暂停（达到 10 分钟或连续失败 3 次），可手动刷新或重新开始查询。</p>
     <h3>已保存的生成请求</h3>
     <table><thead><tr><th>请求号</th><th>操作</th><th>提交状态</th><th></th></tr></thead><tbody><tr v-for="item in requests.filter(item => item.operation !== 'sdkApproval')" :key="item.id"><td>{{ item.id }}</td><td>{{ item.operation }}</td><td>{{ item.status }}</td><td><button :disabled="busy" @click="restore(item)">恢复原请求</button></td></tr></tbody></table>

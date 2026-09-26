@@ -58,6 +58,37 @@ test("isolated HTTP: session, CSRF, user switch, API owner and malformed upload 
       state = await session.json();
     const cookie = session.headers.get("set-cookie")?.split(";")[0] || "";
     assert.equal(state.user.id, "demo-a");
+    store.saveResult(
+      store.user("demo-a"),
+      "API",
+      "local-status-fixture",
+      { submissionNo: "GS-owner", status: "SUCCEEDED" },
+      [],
+    );
+    const statusCookie = session.headers.get("set-cookie")?.split(";")[0] || "";
+    const localStatus = await fetch(
+      `${origin}/api/results/status?submissionNo=GS-owner`,
+      { headers: { cookie: statusCookie, "X-Demo-User": "demo-a" } },
+    );
+    assert.equal(localStatus.status, 200);
+    assert.equal((await localStatus.json()).result.submissionNo, "GS-owner");
+    const foreignStatus = await fetch(
+      `${origin}/api/results/status?submissionNo=GS-owner`,
+      { headers: { cookie: `demo_session=${store.newSession("demo-b")}` } },
+    );
+    assert.deepEqual(await foreignStatus.json(), { result: null });
+    const anonymousStatus = await fetch(
+      `${origin}/api/results/status?submissionNo=GS-owner`,
+    );
+    assert.equal(anonymousStatus.status, 401);
+    await anonymousStatus.arrayBuffer();
+    const mismatchedStatus = await fetch(
+      `${origin}/api/results/status?submissionNo=GS-owner`,
+      { headers: { cookie: statusCookie, "X-Demo-User": "demo-b" } },
+    );
+    assert.equal(mismatchedStatus.status, 409);
+    await mismatchedStatus.arrayBuffer();
+
     assert(cookie.startsWith("demo_session="));
     const post = (
       path: string,

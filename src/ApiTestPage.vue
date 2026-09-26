@@ -4,6 +4,7 @@ import type {
   JsonObject,
   RequestRecord,
   SessionState,
+  StoredResult,
 } from "../shared/types.ts";
 import { api, message } from "./api.ts";
 import {
@@ -13,7 +14,9 @@ import {
   testRequests,
   testResults,
 } from "./api-test.ts";
+import EventFailures from "./EventFailures.vue";
 import { GenerationPoller } from "./generation-poller.ts";
+import { ResultWatcher } from "./result-watcher.ts";
 
 const props = defineProps<{
   session: SessionState;
@@ -37,12 +40,42 @@ const originalRequest = ref<JsonObject>(),
 const finalStatus = ref<JsonObject>(),
   statusError = ref("");
 const pollPaused = ref(false);
+const localResult = ref<StoredResult>();
+const savingState = ref("idle");
+const resultWatcher = new ResultWatcher({
+  userId: actorId,
+  saved: (result) => {
+    localResult.value = result;
+    emit("refresh");
+  },
+  state: (state) => {
+    savingState.value = state;
+  },
+  error: (cause) => {
+    statusError.value = message(cause);
+  },
+});
 const requests = computed(() => testRequests(props.session.requests));
 const results = computed(() =>
-  testResults(props.session.results, props.session.requests, actorId),
+  testResults(
+    localResult.value
+      ? [
+          localResult.value,
+          ...props.session.results.filter(
+            (item) => item.id !== localResult.value?.id,
+          ),
+        ]
+      : props.session.results,
+    props.session.requests,
+    actorId,
+  ),
 );
 const saved = computed(() =>
-  results.value.find((item) => item.payload.clientRequestId === activeId.value),
+  localResult.value?.payload.clientRequestId === activeId.value
+    ? localResult.value
+    : results.value.find(
+        (item) => item.payload.clientRequestId === activeId.value,
+      ),
 );
 const statusText = computed(() => {
   if (saved.value)
@@ -50,7 +83,9 @@ const statusText = computed(() => {
       ? "结果图片已保存"
       : "已保存终态，本次未生成可保存图片";
   if (finalStatus.value?.terminal === true)
-    return "平台已结束生成，后台继续同步和保存结果，可手动刷新查看";
+    return savingState.value === "paused"
+      ? "平台已结束生成，结果仍在后台保存；自动检查已暂停，可手动刷新"
+      : "平台已结束生成，正在等待本地保存结果";
   if (submissionNo.value) return "已受理，正在生成；结果保存后显示";
   if (busy.value && originalRequest.value) return "正在提交生成请求，请稍候";
   if (originalRequest.value)
@@ -169,7 +204,8 @@ const statusPoller = new GenerationPoller<JsonObject>({
     finalStatus.value = result;
     statusError.value = "";
     const complete = result.terminal === true || Boolean(saved.value);
-    if (complete) emit("refresh");
+    if (result.terminal === true && !saved.value)
+      resultWatcher.start(submissionNo.value);
     return complete;
   },
   error: (cause) => {
@@ -181,10 +217,12 @@ const statusPoller = new GenerationPoller<JsonObject>({
   hidden: () => document.hidden,
 });
 function readStatus() {
+  if (savingState.value === "paused") resultWatcher.stop();
   return statusPoller.refresh(submissionNo.value);
 }
 function visibilityChanged() {
   statusPoller.visibilityChanged();
+  resultWatcher.visibilityChanged();
 }
 function restore(item: RequestRecord) {
   stopPolling();
@@ -234,6 +272,8 @@ async function retryEvents() {
   }
 }
 function stopPolling() {
+  resultWatcher.stop();
+  localResult.value = undefined;
   statusPoller.stop();
 }
 function startPolling() {
@@ -247,6 +287,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   lifetime.abort();
   statusPoller.dispose();
+  resultWatcher.dispose();
   document.removeEventListener("visibilitychange", visibilityChanged);
   if (preview.value) URL.revokeObjectURL(preview.value);
 });
@@ -277,6 +318,7 @@ onBeforeUnmount(() => {
         <p class="hint">服务器轮询事件或收到可选回调后保存图片，刷新页面后仍会保留。</p>
         <p v-if="finalStatus?.credits" class="hint">商户实际消费：{{ asObject(finalStatus.credits).charged }} · 退款：{{ asObject(finalStatus.credits).refunded }} · 净消费：{{ asObject(finalStatus.credits).net }}（不是用户售价）</p>
         <p v-if="session.eventSyncError" class="error">{{ session.eventSyncError }} <button type="button" @click="retryEvents">重试待处理事件</button></p>
+        <EventFailures :failures="session.eventFailures" />
         <p v-if="pollPaused" class="hint">自动状态查询已暂停（达到时限或连续失败），后台事件同步仍在运行。<button type="button" @click="startPolling">继续查询</button></p>
         <p v-if="statusError" class="error" role="alert">{{ statusError }}</p>
         <p v-if="!saved && session.generationFailure?.submissionNo === submissionNo" class="error" role="alert">最近一次结果未保存：{{ session.generationFailure.reason }}（{{ new Date(session.generationFailure.at).toLocaleString() }}）。请保留原请求，等待服务端重试同步。</p>

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { JsonObject, MerchantEvent, User } from "../shared/types.ts";
 import { AppError, BusinessError, object, string, uuid } from "./errors.ts";
 import { digest, type Store } from "./store.ts";
@@ -100,8 +101,111 @@ export class SaleLedger {
       CREATE TABLE IF NOT EXISTS sale_request_intents(user_id TEXT NOT NULL REFERENCES users(id),request_id TEXT NOT NULL,PRIMARY KEY(user_id,request_id));
       CREATE TABLE IF NOT EXISTS sale_quotes(quote_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), client_request_id TEXT NOT NULL, snapshot TEXT NOT NULL, price_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(user_id,client_request_id));
       CREATE TABLE IF NOT EXISTS sale_items(item_id TEXT PRIMARY KEY, quote_id TEXT NOT NULL REFERENCES sale_quotes(quote_id), credits INTEGER NOT NULL CHECK(credits>=0));
+      CREATE TABLE IF NOT EXISTS sale_reservations(quote_id TEXT PRIMARY KEY REFERENCES sale_quotes(quote_id), state TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sale_reservation_attempts(attempt_id TEXT PRIMARY KEY, quote_id TEXT NOT NULL REFERENCES sale_quotes(quote_id), status TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS sale_attempts_quote ON sale_reservation_attempts(quote_id,status);
+      CREATE INDEX IF NOT EXISTS sale_items_quote ON sale_items(quote_id);
       CREATE TABLE IF NOT EXISTS sale_settlements(settlement_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), quote_id TEXT NOT NULL, client_request_id TEXT NOT NULL, item_id TEXT NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>=0), original_debit_id TEXT, task_no TEXT NOT NULL, fact_digest TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS sale_settlements_item ON sale_settlements(item_id,quote_id,kind,status);
     `);
+    // Upgrade outstanding old approvals conservatively; settled items contribute zero.
+    store.db.exec(`INSERT OR IGNORE INTO sale_reservations
+      SELECT q.quote_id,'HELD',q.created_at FROM sale_quotes q JOIN requests r
+      ON r.user_id=q.user_id AND r.id=q.client_request_id
+      WHERE r.status IN ('APPROVED','ACCEPTED','UNCONFIRMED','PENDING')`);
+    store.db.exec(`INSERT OR IGNORE INTO sale_reservation_attempts
+      SELECT 'legacy:'||h.quote_id,h.quote_id,'UNKNOWN' FROM sale_reservations h
+      WHERE h.state='HELD' AND NOT EXISTS(SELECT 1 FROM sale_reservation_attempts a WHERE a.quote_id=h.quote_id)`);
+  }
+  held(userId: string) {
+    return Number(
+      this.store.db
+        .prepare(`SELECT COALESCE(SUM(i.credits),0) AS amount FROM sale_reservations h
+      JOIN sale_quotes q ON q.quote_id=h.quote_id JOIN sale_items i ON i.quote_id=q.quote_id
+      WHERE q.user_id=? AND h.state='HELD' AND NOT EXISTS(SELECT 1 FROM sale_settlements s
+        WHERE s.item_id=i.item_id AND s.quote_id=q.quote_id AND s.kind='SALE_DEBIT' AND s.status='APPLIED')`)
+        .get(userId)?.amount || 0,
+    );
+  }
+  reservations(userId: string) {
+    return this.store.db
+      .prepare(`SELECT q.quote_id AS quoteId,q.client_request_id AS requestId,
+      SUM(i.credits) AS amount,q.created_at AS createdAt FROM sale_reservations h
+      JOIN sale_quotes q ON q.quote_id=h.quote_id JOIN sale_items i ON i.quote_id=q.quote_id
+      WHERE q.user_id=? AND h.state='HELD' AND NOT EXISTS(SELECT 1 FROM sale_settlements s
+        WHERE s.item_id=i.item_id AND s.quote_id=q.quote_id AND s.kind='SALE_DEBIT' AND s.status='APPLIED')
+      GROUP BY q.quote_id HAVING SUM(i.credits)>0 ORDER BY q.created_at LIMIT 100`)
+      .all(userId);
+  }
+  private reserve(user: User, quote: SaleQuote) {
+    const old = this.store.db
+      .prepare("SELECT state FROM sale_reservations WHERE quote_id=?")
+      .get(quote.quoteId);
+    if (old?.state === "HELD") return false; // Retry uses its original reservation, even after a debit.
+    const unsettled = quote.saleItems
+      .filter(
+        (item) =>
+          !this.store.db
+            .prepare(
+              "SELECT 1 FROM sale_settlements WHERE item_id=? AND kind='SALE_DEBIT' AND status='APPLIED'",
+            )
+            .get(item.itemId),
+      )
+      .reduce((sum, item) => sum + item.credits, 0);
+    const available = this.store.user(user.id).credits - this.held(user.id);
+    if ((unsettled > 0 && available < unsettled) || available < 0)
+      throw new BusinessError(
+        "INSUFFICIENT_CREDITS",
+        "可用算力不足，部分额度可能正在等待生成结算",
+      );
+    this.store.db
+      .prepare(
+        "INSERT INTO sale_reservations VALUES(?,'HELD',?) ON CONFLICT(quote_id) DO UPDATE SET state='HELD'",
+      )
+      .run(quote.quoteId, new Date().toISOString());
+    return true;
+  }
+  async withReservation(
+    user: User,
+    quote: SaleQuote,
+    work: () => Promise<unknown>,
+  ) {
+    const attemptId = randomUUID();
+    this.freeze(user, quote, () => {
+      this.reserve(user, quote);
+      this.store.db
+        .prepare("INSERT INTO sale_reservation_attempts VALUES(?,?,'PENDING')")
+        .run(attemptId, quote.quoteId);
+    });
+    try {
+      const result = await work();
+      this.store.db
+        .prepare(
+          "UPDATE sale_reservation_attempts SET status='ACCEPTED' WHERE attempt_id=?",
+        )
+        .run(attemptId);
+      return result;
+    } catch (cause) {
+      const status =
+        cause instanceof AppError && cause.code === "UPSTREAM_REJECTED"
+          ? "REJECTED"
+          : "UNKNOWN";
+      this.store.transaction(() => {
+        this.store.db
+          .prepare(
+            "UPDATE sale_reservation_attempts SET status=? WHERE attempt_id=?",
+          )
+          .run(status, attemptId);
+        // All attempts must be explicitly rejected, including other processes.
+        // A crash, unknown reply, successful approval or pending attempt keeps the hold.
+        this.store.db
+          .prepare(`UPDATE sale_reservations SET state='REJECTED' WHERE quote_id=?
+          AND NOT EXISTS(SELECT 1 FROM sale_reservation_attempts a WHERE a.quote_id=sale_reservations.quote_id AND a.status!='REJECTED')
+          AND NOT EXISTS(SELECT 1 FROM sale_settlements s WHERE s.quote_id=sale_reservations.quote_id)`)
+          .run(quote.quoteId);
+      });
+      throw cause;
+    }
   }
   started(userId: string, quoteId: string) {
     return Boolean(
@@ -120,7 +224,7 @@ export class SaleLedger {
       .get(userId, requestId);
     return row ? JSON.parse(String(row.snapshot)) : undefined;
   }
-  freeze(user: User, input: SaleQuote) {
+  freeze(user: User, input: SaleQuote, reserve?: () => void) {
     const quote = saleQuote(input, user, input.clientRequestId);
     return this.store.transaction(() => {
       const priceDigest = digest({
@@ -158,6 +262,7 @@ export class SaleLedger {
           insert.run(item.itemId, quote.quoteId, item.credits);
       }
       this.reconcile(user.id, quote.quoteId);
+      reserve?.();
       return quote;
     });
   }

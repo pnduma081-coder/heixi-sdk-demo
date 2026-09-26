@@ -2,7 +2,7 @@ import { examples } from "../shared/examples.ts";
 import type { JsonObject, User } from "../shared/types.ts";
 import { AppError, BusinessError, string, uuid } from "./errors.ts";
 import type { MerchantClient } from "./merchant.ts";
-import { type SaleQuote, saleQuote } from "./sale-ledger.ts";
+import { saleQuote } from "./sale-ledger.ts";
 import type { Store } from "./store.ts";
 
 export class Operations {
@@ -32,12 +32,17 @@ export class Operations {
           clientRequestId,
           quoteId,
         );
-        return this.api.request(
-          `/open/sdk/generation-quotes/${quoteId}/approve`,
-          user.externalUserId,
-          {
-            body: { clientRequestId, estimatedCredits: quote.estimatedCredits },
-          },
+        return this.store.sales.withReservation(user, quote, () =>
+          this.api.request(
+            `/open/sdk/generation-quotes/${quoteId}/approve`,
+            user.externalUserId,
+            {
+              body: {
+                clientRequestId,
+                estimatedCredits: quote.estimatedCredits,
+              },
+            },
+          ),
         );
       },
     );
@@ -83,33 +88,24 @@ export class Operations {
           409,
           "旧报价请求缺少冻结快照，请先核对原受理状态，不能改用直接生成重提",
         );
-      this.checkBalance(user, quote);
-      await this.api.request(
-        `/open/generation-quotes/${quote.quoteId}/approve`,
-        user.externalUserId,
-        {
-          body: {
-            clientRequestId: id,
-            estimatedCredits: quote.estimatedCredits,
+      return this.store.sales.withReservation(user, quote, async () => {
+        await this.api.request(
+          `/open/generation-quotes/${quote.quoteId}/approve`,
+          user.externalUserId,
+          {
+            body: {
+              clientRequestId: id,
+              estimatedCredits: quote.estimatedCredits,
+            },
           },
-        },
-      );
-      return this.api.request(
-        `/open/generation-quotes/${quote.quoteId}/submit`,
-        user.externalUserId,
-        { body: {} },
-      );
+        );
+        return this.api.request(
+          `/open/generation-quotes/${quote.quoteId}/submit`,
+          user.externalUserId,
+          { body: {} },
+        );
+      });
     });
-  }
-  private checkBalance(user: User, quote: SaleQuote) {
-    // 既有扣费回调证明任务已开始，网络超时恢复原受理不能被扣费后的余额拦住。
-    if (this.store.sales.started(user.id, quote.quoteId)) return;
-    const balance = this.store.user(user.id).credits;
-    if (balance < 0 || balance < quote.estimatedCredits)
-      throw new BusinessError(
-        "INSUFFICIENT_CREDITS",
-        "本地用户算力不足，请先增加测试算力",
-      );
   }
   private confirmQuote(
     user: User,
@@ -120,8 +116,7 @@ export class Operations {
     const quote = saleQuote(value, user, requestId);
     if (quoteId && quote.quoteId !== quoteId)
       throw new BusinessError("QUOTE_MISMATCH", "报价与当前请求不匹配");
-    this.checkBalance(user, quote);
-    return this.store.sales.freeze(user, quote);
+    return quote;
   }
 
   private saved(

@@ -76,7 +76,13 @@ export class EventInbox {
       )
       .run(userId, key);
   }
-  failed(userId: string, key: string, attempts: number, now: number) {
+  failed(
+    userId: string,
+    key: string,
+    attempts: number,
+    now: number,
+    cause?: unknown,
+  ) {
     const delay = Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6));
     this.store.db
       .prepare(
@@ -84,10 +90,45 @@ export class EventInbox {
       )
       .run(
         now + delay,
-        "事件尚未处理成功；原文已保存，待重试或修复对应协议/存储问题。",
+        cause instanceof AppError
+          ? cause.code === "RESULT_SAVE" && cause.status !== 400
+            ? "MEDIA"
+            : "CONTRACT"
+          : "PROCESSING",
         userId,
         key,
       );
+  }
+  diagnostics(userId: string) {
+    const labels: Record<string, string> = {
+      MEDIA: "媒体下载或保存失败",
+      CONTRACT: "事件格式、身份或结算关联不符",
+      PROCESSING: "本地处理或存储失败",
+    };
+    return this.store.db
+      .prepare(
+        "SELECT event_key,payload,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND status='PENDING' AND attempts>0 ORDER BY next_attempt,rowid LIMIT 20",
+      )
+      .all(userId)
+      .map((row) => {
+        const raw = JSON.parse(String(row.payload));
+        const no = raw?.data?.submissionNo;
+        const category = Object.hasOwn(labels, String(row.last_error))
+          ? String(row.last_error)
+          : "PROCESSING";
+        return {
+          eventKey: /^[a-f0-9-]{36}$/i.test(String(row.event_key))
+            ? String(row.event_key)
+            : digest(String(row.event_key)),
+          category,
+          reason: labels[category],
+          attempts: Number(row.attempts),
+          nextAttemptAt: new Date(Number(row.next_attempt)).toISOString(),
+          ...(typeof no === "string" && /^GS[A-Za-z0-9-]{1,62}$/.test(no)
+            ? { submissionNo: no }
+            : {}),
+        };
+      });
   }
   pending(userId: string) {
     return Number(

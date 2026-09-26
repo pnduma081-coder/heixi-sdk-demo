@@ -54,8 +54,24 @@ export type SessionState = {
     createdAt: string;
   }>;
   pendingSales?: JsonObject[];
+  reservedCredits?: number;
+  availableCredits?: number;
+  reservations?: Array<{
+    quoteId: string;
+    requestId: string;
+    amount: number;
+    createdAt: string;
+  }>;
   generationFailure?: { submissionNo: string; reason: string; at: string };
   eventSyncError?: string;
+  eventFailures?: Array<{
+    eventKey: string;
+    category: string;
+    reason: string;
+    attempts: number;
+    nextAttemptAt: string;
+    submissionNo?: string;
+  }>;
 };
 export type DemoConfig = {
   apiOrigin?: string;

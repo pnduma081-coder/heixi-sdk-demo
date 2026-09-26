@@ -105,6 +105,9 @@ export class MerchantClient {
               ? "请求未被接受，请核对参数或业务条件，并查看安全错误详情与 traceId"
               : "黑犀 API 调用失败",
         details,
+        response.status >= 400 && response.status < 500
+          ? "UPSTREAM_REJECTED"
+          : undefined,
       );
     }
     return envelope.data;

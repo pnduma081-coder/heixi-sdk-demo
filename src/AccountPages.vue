@@ -15,6 +15,7 @@ import type {
 } from "../shared/types.ts";
 import Icon from "./AppIcon.vue";
 import { api, message, pretty } from "./api.ts";
+import EventFailures from "./EventFailures.vue";
 import { loadSdk } from "./sdk.ts";
 
 const props = defineProps<{
@@ -146,7 +147,10 @@ onBeforeUnmount(() => {
     <template v-else-if="section === 'credits'">
       <div class="page-heading"><div><h1>算力账户</h1><p>查看当前账户的充值、消费与退款记录。</p></div><button @click="emit('refresh')"><Icon name="refresh" />刷新记录</button></div>
       <p v-if="session.eventSyncError" class="error">{{ session.eventSyncError }}</p>
-      <div class="balance-banner"><div><span>当前可用算力</span><strong>{{ session.user.credits.toLocaleString() }}<small>算力</small></strong><p>{{ session.user.name }} · 本地测试账户</p></div><button class="primary" @click="emit('recharge')">增加测试算力</button></div>
+      <EventFailures :failures="session.eventFailures" />
+      <div class="balance-banner"><div><span>当前可用算力</span><strong>{{ (session.availableCredits ?? session.user.credits).toLocaleString() }}<small>算力</small></strong><p>{{ session.user.name }} · 本地测试账户</p></div><button class="primary" @click="emit('recharge')">增加测试算力</button></div>
+      <p v-if="session.reservedCredits" class="hint" role="status">账面余额 {{ session.user.credits }}；待结算预占 {{ session.reservedCredits }}。收到扣款事件后按分项抵扣预占，不会重复扣款。</p>
+      <details v-if="session.reservations?.length" class="surface"><summary>待结算预占</summary><table><thead><tr><th>请求号</th><th>金额</th><th>预占时间</th></tr></thead><tbody><tr v-for="item in session.reservations" :key="item.quoteId"><td>{{ item.requestId }}</td><td>{{ item.amount }}</td><td>{{ new Date(item.createdAt).toLocaleString() }}</td></tr></tbody></table><p class="hint">超时或未收到事件不代表任务取消；未确定的预占保留，需核对平台结算。</p></details>
       <p v-if="session.pendingSales?.length" class="hint" role="status">有 {{ session.pendingSales.length }} 条售价结算等待原报价或原扣费关联；关联完成前不改变用户余额。</p>
       <div class="surface"><h2>算力明细</h2><table><thead><tr><th>时间</th><th>业务类型</th><th>变动算力</th><th>余额</th></tr></thead><tbody><tr v-for="item in session.ledger" :key="item.id"><td>{{ new Date(item.createdAt).toLocaleString() }}</td><td>{{ types[item.kind] || item.kind }}</td><td :class="item.delta > 0 ? 'positive' : 'negative'">{{ item.delta > 0 ? '+' : '' }}{{ item.delta }}</td><td>{{ item.balance }}</td></tr></tbody></table><p v-if="!session.ledger.length" class="empty-caption">暂无算力记录，可以先增加测试算力开始创作。</p></div>
       <details class="surface"><summary>平台成本记录（AI 成本不计入用户余额）</summary><p class="hint">AI 生成按确认时的商户售价结算。模板解锁保留原扣费规则，暂未接入自定义售价。</p><table><thead><tr><th>时间</th><th>平台业务</th><th>成本变动</th></tr></thead><tbody><tr v-for="item in session.platformCosts || []" :key="item.eventId"><td>{{ new Date(item.createdAt).toLocaleString() }}</td><td>{{ item.kind }}</td><td>{{ item.delta }}</td></tr></tbody></table><p v-if="!session.platformCosts?.length" class="empty-caption">暂无平台成本记录</p></details>

@@ -148,8 +148,15 @@ export function createHandler(
           requests: store.requests(user.id),
           generationFailure: results.generationFailures.get(user.id),
           eventSyncError: results.syncIssue(user.id),
+          eventFailures: results.inbox.diagnostics(user.id),
           platformCosts: store.platformCosts(user.id),
           pendingSales: store.sales.pending(user.id),
+          reservedCredits: store.sales.held(user.id),
+          availableCredits: Math.max(
+            0,
+            user.credits - store.sales.held(user.id),
+          ),
+          reservations: store.sales.reservations(user.id),
         });
         return true;
       }
@@ -160,7 +167,12 @@ export function createHandler(
       if (req.method === "GET" || fileHead) {
         if (path === "/api/sdk/state")
           json(res, { resultCursor: store.cursor(user.id) || null });
-        else if (path.startsWith("/files/")) {
+        else if (path === "/api/results/status") {
+          const no = string(url.searchParams.get("submissionNo"), 64);
+          if (!/^GS[A-Za-z0-9-]{1,62}$/.test(no))
+            throw new AppError(400, "受理号格式错误");
+          json(res, { result: store.resultForSubmission(user.id, no) || null });
+        } else if (path.startsWith("/files/")) {
           const id = path.slice(7);
           if (!/^[a-f0-9]{64}$/.test(id)) throw new AppError(404, "文件不存在");
           const file = store.file(user.id, id);
