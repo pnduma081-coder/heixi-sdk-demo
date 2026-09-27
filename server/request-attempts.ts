@@ -17,10 +17,15 @@ export class RequestAttempts {
         SELECT user_id,id,'legacy','UNCONFIRMED' FROM requests r
         WHERE response IS NULL AND status IN ('PENDING','UNCONFIRMED')
         AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.user_id=r.user_id AND a.request_id=r.id);
-      UPDATE requests SET status='UNCONFIRMED'
+      UPDATE requests SET status=CASE
+        WHEN EXISTS(SELECT 1 FROM request_attempts a WHERE a.user_id=requests.user_id
+          AND a.request_id=requests.id AND a.status NOT IN ('NOT_SENT','REJECTED')) THEN 'UNCONFIRMED'
+        WHEN EXISTS(SELECT 1 FROM request_attempts a WHERE a.user_id=requests.user_id
+          AND a.request_id=requests.id AND a.status='REJECTED') THEN 'REJECTED'
+        ELSE 'NOT_SENT' END
         WHERE status='PENDING' AND response IS NULL
         AND EXISTS(SELECT 1 FROM request_attempts a WHERE a.user_id=requests.user_id
-          AND a.request_id=requests.id AND a.status IN ('UNCONFIRMED','ACCEPTED'));
+          AND a.request_id=requests.id);
     `);
   }
   begin(userId: string, requestId: string) {

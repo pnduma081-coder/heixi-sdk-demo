@@ -437,6 +437,7 @@ test("automatic retries expire within 24 hours and neither restart nor redeliver
         Date.now(),
         resultSaveError(504, "still offline"),
       );
+      if (inbox.diagnostics("demo-a")[0].paused) break;
       const next = Date.parse(
         inbox.diagnostics("demo-a")[0].nextAttemptAt || "",
       );
@@ -448,7 +449,8 @@ test("automatic retries expire within 24 hours and neither restart nor redeliver
         inbox.receive(store.user("demo-a"), [raw], key);
       }
     }
-    assert.equal(Date.now(), deadline);
+    assert(Date.now() < deadline);
+    assert(Date.now() + 3600000 >= deadline);
     assert.equal(inbox.paused("demo-a"), 1);
     assert.equal(inbox.deferred("demo-a"), 0);
     assert.equal(inbox.diagnostics("demo-a")[0].nextAttemptAt, null);
@@ -477,7 +479,14 @@ test("restart reconciles interrupted sends without changing saved responses, rej
   let store = new Store(join(directory, "test.sqlite"));
   const response = { submissionNo: "GSaccepted" };
   try {
-    for (const id of ["sent", "legacy", "saved", "rejected", "unsent"]) {
+    for (const id of [
+      "sent",
+      "legacy",
+      "saved",
+      "rejected",
+      "unsent",
+      "rejected-before-record",
+    ]) {
       store.startRequest("demo-a", id, "design", { clientRequestId: id });
       if (id === "legacy") continue;
       const attempt = store.attempts.begin("demo-a", id);
@@ -486,13 +495,15 @@ test("restart reconciles interrupted sends without changing saved responses, rej
         void attempt.send(() => new Promise(() => {}));
       } else if (id === "saved") {
         store.finishRequest("demo-a", id, response, "ACCEPTED");
-      } else if (id === "rejected") {
+      } else if (id.startsWith("rejected")) {
         await assert.rejects(
           attempt.send(async () => {
             throw new AppError(409, "refused", undefined, "UPSTREAM_REJECTED");
           }),
         );
-        attempt.failed();
+        if (id === "rejected") attempt.failed();
+      } else if (id === "unsent") {
+        store.attempts.begin("demo-a", id); // Every attempt is known not sent.
       }
     }
     assert.equal(
@@ -507,11 +518,74 @@ test("restart reconciles interrupted sends without changing saved responses, rej
     assert.equal(rows.find((r) => r.id === "saved")?.status, "ACCEPTED");
     assert.deepEqual(rows.find((r) => r.id === "saved")?.response, response);
     assert.equal(rows.find((r) => r.id === "rejected")?.status, "REJECTED");
-    assert.equal(rows.find((r) => r.id === "unsent")?.status, "PENDING");
+    assert.equal(rows.find((r) => r.id === "unsent")?.status, "NOT_SENT");
+    assert.equal(
+      rows.find((r) => r.id === "rejected-before-record")?.status,
+      "REJECTED",
+    );
     store.close();
     store = new Store(join(directory, "test.sqlite"));
     assert.deepEqual(store.requests("demo-a"), rows);
   } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("retry times are executable before the deadline; equality and overshoot pause without extra attempts", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+  const store = new Store(":memory:");
+  try {
+    const inbox = new EventInbox(store),
+      user = store.user("demo-a");
+    const deadline = Date.now() + 24 * 3600000;
+    for (const remaining of [3600001, 3600000, 3599999]) {
+      const key = randomUUID();
+      inbox.receive(user, [{ eventId: key }], key);
+      store.db
+        .prepare("UPDATE api_event_inbox SET attempts=7 WHERE event_key=?")
+        .run(key);
+      const now = deadline - remaining;
+      inbox.failed(user.id, key, 7, now, resultSaveError(504, "offline"));
+      const row = inbox.diagnostics(user.id).find((r) => r.eventKey === key);
+      assert(row);
+      if (remaining > 3600000) {
+        assert.equal(row.nextAttemptAt, new Date(deadline - 1).toISOString());
+        assert(
+          inbox.due(user.id, deadline - 1).some((item) => item.key === key),
+        );
+        inbox.complete(user.id, key);
+      } else {
+        assert.equal(row.paused, true);
+        assert.equal(row.nextAttemptAt, null);
+        assert(!inbox.due(user.id, now).some((item) => item.key === key));
+      }
+    }
+    assert.deepEqual(inbox.due(user.id, deadline), []);
+  } finally {
+    store.close();
+  }
+});
+
+test("startup reconciliation during another connection's preflight still allows its eventual send and success", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rhino-preflight-recovery-"));
+  const store = new Store(join(directory, "test.sqlite"));
+  store.startRequest("demo-a", "preflight", "sdkApproval", {});
+  const attempt = store.attempts.begin("demo-a", "preflight");
+  const other = new Store(join(directory, "test.sqlite"));
+  try {
+    assert.equal(other.requests("demo-a")[0].status, "NOT_SENT");
+    assert.equal(new EventSyncState(other).active("demo-a"), false);
+    const result = await attempt.send(async () => {
+      assert.equal(other.requests("demo-a")[0].status, "PENDING");
+      return { approved: true };
+    });
+    store.finishRequest("demo-a", "preflight", result, "APPROVED");
+    attempt.complete();
+    assert.equal(other.requests("demo-a")[0].status, "APPROVED");
+    assert.deepEqual(other.requests("demo-a")[0].response, result);
+  } finally {
+    other.close();
     store.close();
     rmSync(directory, { recursive: true, force: true });
   }

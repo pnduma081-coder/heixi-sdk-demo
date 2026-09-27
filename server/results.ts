@@ -69,7 +69,7 @@ export class ResultService {
           ? `${this.inbox.deferred(userId)} 条事件因下载或本地处理故障转为每小时自动重试，自动恢复窗口为接收后 24 小时，超期暂停；也可手动重试，尚未处理成功。`
           : "",
         this.inbox.paused(userId)
-          ? `${this.inbox.paused(userId)} 条事件已暂停自动重试（失败次数达到上限、超期或历史期限未知），原文保留；请排查原因后手动重试，勿视为已结算。`
+          ? `${this.inbox.paused(userId)} 条事件已暂停自动重试（失败次数达到上限、期限内无法继续重试或历史期限未知），原文保留；请排查原因后手动重试，勿视为已结算。`
           : "",
       ]
         .filter(Boolean)

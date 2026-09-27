@@ -134,19 +134,23 @@ export class EventInbox {
         )
         .get(userId, key)?.deadline || 0,
     );
-    const paused =
-      now >= deadline || (category === "CONTRACT" && cycleAttempts + 1 >= 3);
     const deferred = category !== "CONTRACT" && cycleAttempts + 1 >= 8;
     const delay = deferred
       ? slowRetryMs
       : Math.min(300_000, 5000 * 2 ** Math.min(cycleAttempts, 6));
+    const nextAttempt = now + delay;
+    // The recovery interval is exclusive of its deadline. If the next normal
+    // retry cannot fit, pause now instead of advertising an impossible retry.
+    const paused =
+      nextAttempt >= deadline ||
+      (category === "CONTRACT" && cycleAttempts + 1 >= 3);
     this.store.db
       .prepare(
         "UPDATE api_event_inbox SET status=?,attempts=attempts+1,next_attempt=?,last_error=? WHERE user_id=? AND event_key=?",
       )
       .run(
         paused ? "PAUSED" : deferred ? "RETRY_LATER" : "PENDING",
-        Math.min(now + delay, deadline),
+        paused ? 0 : nextAttempt,
         category,
         userId,
         key,
