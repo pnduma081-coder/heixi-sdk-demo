@@ -3,6 +3,7 @@ import { AppError } from "./errors.ts";
 import { digest, type Store } from "./store.ts";
 
 const slowRetryMs = 3600_000;
+const recoveryWindowMs = 24 * 3600_000;
 
 // 游标表示已可靠接收；处理成功单独标记。异常事件保留原文，不伪装为已结算。
 export class EventInbox {
@@ -23,13 +24,23 @@ export class EventInbox {
         PRIMARY KEY(user_id,event_key),
         FOREIGN KEY(user_id,event_key) REFERENCES api_event_inbox(user_id,event_key)
       );
+      CREATE TABLE IF NOT EXISTS api_event_retry_windows(
+        user_id TEXT NOT NULL, event_key TEXT NOT NULL, deadline INTEGER NOT NULL,
+        PRIMARY KEY(user_id,event_key),
+        FOREIGN KEY(user_id,event_key) REFERENCES api_event_inbox(user_id,event_key)
+      );
     `);
-    // Upgrade previously paused transient failures once; later restarts keep
-    // their due time, so restarting cannot postpone recovery indefinitely.
-    store.db
-      .prepare(`UPDATE api_event_inbox SET status='RETRY_LATER',next_attempt=MAX(next_attempt,?)
-      WHERE status='PAUSED' AND last_error IN ('MEDIA','PROCESSING')`)
-      .run(Date.now() + slowRetryMs);
+    // Historical age is unknown: never grant old rows a new recovery window.
+    // This also quarantines rows reactivated by the previous release.
+    this.expire(Date.now());
+  }
+  private expire(now: number, userId?: string) {
+    this.store.db
+      .prepare(`UPDATE api_event_inbox SET status='PAUSED'
+      WHERE ${userId === undefined ? "" : "user_id=? AND"} status IN ('PENDING','RETRY_LATER')
+      AND NOT EXISTS(SELECT 1 FROM api_event_retry_windows w
+        WHERE w.user_id=api_event_inbox.user_id AND w.event_key=api_event_inbox.event_key AND w.deadline>?)`)
+      .run(...(userId === undefined ? [] : [userId]), now);
   }
   receive(user: User, items: unknown[], cursor: string) {
     this.store.transaction(() => {
@@ -60,11 +71,17 @@ export class EventInbox {
             "INSERT OR IGNORE INTO api_event_inbox(user_id,event_key,payload,digest) VALUES(?,?,?,?)",
           )
           .run(user.id, key, JSON.stringify(raw), hash);
+        // Duplicate delivery must not extend the original deadline or revive DONE/PAUSED.
+        if (!old)
+          this.store.db
+            .prepare("INSERT INTO api_event_retry_windows VALUES(?,?,?)")
+            .run(user.id, key, Date.now() + recoveryWindowMs);
       }
       this.store.saveApiEventCursor(user.id, cursor);
     });
   }
   due(userId: string, now: number) {
+    this.expire(now, userId);
     // 给重试保留名额，持续流入的新事件不能让旧失败项永久饥饿；也给新事件留出处理容量。
     const retries = this.store.db
       .prepare(
@@ -110,7 +127,15 @@ export class EventInbox {
         .get(userId, key)?.baseline || 0,
     );
     const cycleAttempts = Math.max(0, attempts - baseline);
-    const paused = category === "CONTRACT" && cycleAttempts + 1 >= 3;
+    const deadline = Number(
+      this.store.db
+        .prepare(
+          "SELECT deadline FROM api_event_retry_windows WHERE user_id=? AND event_key=?",
+        )
+        .get(userId, key)?.deadline || 0,
+    );
+    const paused =
+      now >= deadline || (category === "CONTRACT" && cycleAttempts + 1 >= 3);
     const deferred = category !== "CONTRACT" && cycleAttempts + 1 >= 8;
     const delay = deferred
       ? slowRetryMs
@@ -121,7 +146,7 @@ export class EventInbox {
       )
       .run(
         paused ? "PAUSED" : deferred ? "RETRY_LATER" : "PENDING",
-        now + delay,
+        Math.min(now + delay, deadline),
         category,
         userId,
         key,
@@ -135,7 +160,7 @@ export class EventInbox {
     };
     return this.store.db
       .prepare(
-        "SELECT event_key,payload,status,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','RETRY_LATER','PAUSED') AND attempts>0 ORDER BY next_attempt,rowid LIMIT 20",
+        "SELECT event_key,payload,status,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND (status='PAUSED' OR (status IN ('PENDING','RETRY_LATER') AND attempts>0)) ORDER BY next_attempt,rowid LIMIT 20",
       )
       .all(userId)
       .map((row) => {
@@ -182,6 +207,12 @@ export class EventInbox {
   }
   retry(userId: string) {
     this.store.transaction(() => {
+      // Only this explicit user action can grant historical/expired events a new window.
+      this.store.db
+        .prepare(`INSERT INTO api_event_retry_windows(user_id,event_key,deadline)
+        SELECT user_id,event_key,? FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','PAUSED','RETRY_LATER')
+        ON CONFLICT(user_id,event_key) DO UPDATE SET deadline=excluded.deadline`)
+        .run(Date.now() + recoveryWindowMs, userId);
       // Start a new bounded retry cycle without erasing lifetime failure counts.
       this.store.db
         .prepare(`INSERT INTO api_event_retry_cycles(user_id,event_key,baseline)

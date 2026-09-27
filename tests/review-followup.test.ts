@@ -205,7 +205,7 @@ test("invalid events pause durably, retain original payload and retry manually w
     inbox.retry("demo-b");
     assert.equal(inbox.paused(user.id), 1);
     inbox.retry(user.id);
-    assert.deepEqual(inbox.due(user.id, Number.MAX_SAFE_INTEGER)[0].value, raw);
+    assert.deepEqual(inbox.due(user.id, Date.now())[0].value, raw);
     inbox.failed(user.id, key, 3, 0, new AppError(400, "still bad"));
     assert.equal(inbox.pending(user.id), 1);
     assert.equal(inbox.diagnostics(user.id)[0].attempts, 4);
@@ -359,48 +359,113 @@ test("media and storage failures automatically recover after restart at the pers
   }
 });
 
-test("upgrade restores paused transient failures once, preserves contract quarantine and allows scoped manual retry", (t) => {
+test("upgrade never revives old failures, including records reactivated by the previous release", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
   const directory = mkdtempSync(join(tmpdir(), "rhino-retry-upgrade-"));
   let store = new Store(join(directory, "test.sqlite"));
   try {
     let inbox = new EventInbox(store);
-    for (const category of ["MEDIA", "PROCESSING", "CONTRACT"]) {
+    for (const [status, category] of [
+      ["PAUSED", "MEDIA"],
+      ["PAUSED", "PROCESSING"],
+      ["PAUSED", "CONTRACT"],
+      ["RETRY_LATER", "MEDIA"],
+      ["PENDING", "PROCESSING"],
+      ["DONE", "MEDIA"],
+    ]) {
       const key = randomUUID();
       inbox.receive(store.user("demo-a"), [{ eventId: key }], key);
       store.db
         .prepare(
-          "UPDATE api_event_inbox SET status='PAUSED',attempts=8,last_error=?,next_attempt=? WHERE event_key=?",
+          "UPDATE api_event_inbox SET status=?,attempts=8,last_error=?,next_attempt=0 WHERE event_key=?",
         )
-        .run(category, Date.now(), key);
+        .run(status, category, key);
     }
+    store.db.exec("DELETE FROM api_event_retry_windows"); // Previous schema had no age evidence.
+    t.mock.timers.setTime(Date.now() + 3 * 365 * 24 * 3600000);
     store.close();
     store = new Store(join(directory, "test.sqlite"));
     inbox = new EventInbox(store);
-    assert.equal(inbox.deferred("demo-a"), 2);
-    assert.equal(inbox.paused("demo-a"), 1);
-    const deadline = Date.now() + 3600000;
-    assert(
-      inbox
-        .diagnostics("demo-a")
-        .filter((r) => !r.paused)
-        .every(
-          (r) =>
-            r.attempts === 8 && Date.parse(r.nextAttemptAt || "") === deadline,
-        ),
-    );
-    t.mock.timers.setTime(deadline - 1);
-    store.close();
-    store = new Store(join(directory, "test.sqlite"));
-    inbox = new EventInbox(store);
-    assert.equal(inbox.due("demo-a", deadline - 1).length, 0);
-    assert.equal(inbox.due("demo-a", deadline).length, 2); // Restart did not reset the clock.
-    inbox.retry("demo-b");
-    assert.equal(inbox.deferred("demo-a"), 2);
-    inbox.retry("demo-a");
     assert.equal(inbox.deferred("demo-a"), 0);
-    assert.equal(inbox.pending("demo-a"), 3);
+    assert.equal(inbox.paused("demo-a"), 5);
+    assert.equal(inbox.pending("demo-a"), 0);
+    assert.deepEqual(inbox.due("demo-a", Date.now()), []);
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    inbox = new EventInbox(store);
+    assert.deepEqual(inbox.due("demo-a", Date.now()), []);
+    inbox.retry("demo-b");
+    assert.equal(inbox.paused("demo-a"), 5);
+    inbox.retry("demo-a"); // Explicit owner action is the only way to revive them.
+    assert.equal(inbox.pending("demo-a"), 5);
+    assert.equal(inbox.due("demo-a", Date.now()).length, 5);
     assert(inbox.diagnostics("demo-a").every((r) => r.attempts === 8));
+    assert.equal(
+      store.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM api_event_inbox WHERE status='DONE'",
+        )
+        .get()?.n,
+      1,
+    );
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("automatic retries expire within 24 hours and neither restart nor redelivery renews the deadline", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+  const directory = mkdtempSync(join(tmpdir(), "rhino-retry-deadline-"));
+  let store = new Store(join(directory, "test.sqlite"));
+  try {
+    let inbox = new EventInbox(store);
+    const key = randomUUID(),
+      raw = { eventId: key };
+    const deadline = Date.now() + 24 * 3600000;
+    inbox.receive(store.user("demo-a"), [raw], key);
+    let reads = 0;
+    for (;;) {
+      const [item] = inbox.due("demo-a", Date.now());
+      if (!item) break;
+      assert(Date.now() < deadline);
+      assert(++reads <= 32, "automatic retries must be finite");
+      inbox.failed(
+        "demo-a",
+        key,
+        item.attempts,
+        Date.now(),
+        resultSaveError(504, "still offline"),
+      );
+      const next = Date.parse(
+        inbox.diagnostics("demo-a")[0].nextAttemptAt || "",
+      );
+      t.mock.timers.setTime(next);
+      if (reads === 8) {
+        store.close();
+        store = new Store(join(directory, "test.sqlite"));
+        inbox = new EventInbox(store);
+        inbox.receive(store.user("demo-a"), [raw], key);
+      }
+    }
+    assert.equal(Date.now(), deadline);
+    assert.equal(inbox.paused("demo-a"), 1);
+    assert.equal(inbox.deferred("demo-a"), 0);
+    assert.equal(inbox.diagnostics("demo-a")[0].nextAttemptAt, null);
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    inbox = new EventInbox(store);
+    inbox.receive(store.user("demo-a"), [raw], key);
+    assert.deepEqual(inbox.due("demo-a", Date.now()), []);
+    inbox.retry("demo-a");
+    assert.equal(inbox.due("demo-a", Date.now()).length, 1);
+    assert.equal(inbox.diagnostics("demo-a")[0].attempts, reads);
+    t.mock.timers.setTime(Date.now() + 24 * 3600000);
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    inbox = new EventInbox(store);
+    assert.equal(inbox.paused("demo-a"), 1);
+    assert.deepEqual(inbox.due("demo-a", Date.now()), []);
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });
