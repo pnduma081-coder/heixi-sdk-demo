@@ -9,6 +9,7 @@ import { EventInbox } from "../server/event-inbox.ts";
 import { EventSyncState } from "../server/event-sync-state.ts";
 import { MerchantClient } from "../server/merchant.ts";
 import { Operations } from "../server/operations.ts";
+import { ResultService } from "../server/results.ts";
 import { Store } from "../server/store.ts";
 import { requestStatusLabel } from "../src/request-status.ts";
 
@@ -217,7 +218,7 @@ test("invalid events pause durably, retain original payload and retry manually w
   }
 });
 
-test("persistent media failures also have a finite retry budget without pretending the event succeeded", () => {
+test("persistent media failures switch to hourly retry without pretending the event succeeded", () => {
   const store = new Store(":memory:");
   try {
     const inbox = new EventInbox(store),
@@ -232,10 +233,221 @@ test("persistent media failures also have a finite retry budget without pretendi
         i * 300000,
         resultSaveError(502, "download failed"),
       );
-    assert.equal(inbox.paused(user.id), 1);
+    assert.equal(inbox.paused(user.id), 0);
+    assert.equal(inbox.deferred(user.id), 1);
+    assert.equal(inbox.pending(user.id), 0);
+    const due = 7 * 300000 + 3600000;
+    assert.equal(inbox.due(user.id, due - 1).length, 0);
+    assert.equal(inbox.due(user.id, due).length, 1);
+    assert.equal(
+      inbox.diagnostics(user.id)[0].nextAttemptAt,
+      new Date(due).toISOString(),
+    );
     assert.equal(inbox.diagnostics(user.id)[0].attempts, 8);
     assert.equal(store.processed(key, user.id), false);
   } finally {
     store.close();
+  }
+});
+
+test("media and storage failures automatically recover after restart at the persisted hourly deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+  for (const failure of [
+    resultSaveError(504, "CDN timeout"),
+    new Error("temporary disk failure"),
+  ]) {
+    const directory = mkdtempSync(join(tmpdir(), "rhino-hourly-retry-"));
+    let store = new Store(join(directory, "test.sqlite"));
+    let broken = true,
+      downloads = 0;
+    const eventId = randomUUID();
+    const client = new MerchantClient(
+      "https://fixture.invalid",
+      "fixture",
+      async () =>
+        Response.json({ code: 0, data: { items: [], hasMore: false } }),
+      auth,
+    );
+    const media = {
+      save: async () => {
+        downloads++;
+        if (broken) throw failure;
+        return {
+          id: "a".repeat(64),
+          name: "result.mp4",
+          bytes: 1,
+          contentType: "video/mp4",
+        };
+      },
+    };
+    try {
+      let results = new ResultService(store, client, media);
+      results.inbox.receive(
+        store.user("demo-a"),
+        [
+          {
+            eventId,
+            eventVersion: "merchant-events/v1",
+            eventType: "generation.finished",
+            externalUserId: "demo-user-a",
+            occurredAt: new Date().toISOString(),
+            data: {
+              requestChannel: "API",
+              clientRequestId: "hourly-recovery",
+              submissionNo: "GShourly",
+              status: "SUCCEEDED",
+              tasks: [
+                {
+                  role: "OUTPUT",
+                  results: [
+                    {
+                      type: "VIDEO",
+                      url: "https://fixture.invalid/result.mp4",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        eventId,
+      );
+      for (let i = 0; i < 8; i++) {
+        if (i)
+          t.mock.timers.setTime(
+            Date.parse(
+              results.inbox.diagnostics("demo-a")[0].nextAttemptAt || "",
+            ),
+          );
+        const report = await results.syncEvents(store.user("demo-a"));
+        assert.equal(report.pending, i === 7 ? 0 : 1);
+      }
+      assert.equal(downloads, 8);
+      assert.match(results.syncIssue("demo-a") || "", /每小时自动重试/);
+      const due = Date.parse(
+        results.inbox.diagnostics("demo-a")[0].nextAttemptAt || "",
+      );
+      assert.equal(due - Date.now(), 3600000);
+      store.close();
+      store = new Store(join(directory, "test.sqlite"));
+      results = new ResultService(store, client, media);
+      t.mock.timers.setTime(due - 1);
+      await results.syncEvents(store.user("demo-a"));
+      assert.equal(downloads, 8);
+      t.mock.timers.setTime(due);
+      await results.syncEvents(store.user("demo-a"));
+      assert.equal(downloads, 9);
+      assert.equal(results.inbox.deferred("demo-a"), 1);
+      assert.equal(
+        Date.parse(results.inbox.diagnostics("demo-a")[0].nextAttemptAt || ""),
+        due + 3600000,
+      );
+      broken = false;
+      t.mock.timers.setTime(due + 3600000);
+      await results.syncEvents(store.user("demo-a"));
+      assert.equal(downloads, 10);
+      assert.equal(store.results("demo-a").length, 1);
+      assert.equal(store.results("demo-b").length, 0);
+      assert.equal(results.inbox.deferred("demo-a"), 0);
+      assert.equal(results.syncIssue("demo-a"), undefined);
+      await results.syncEvents(store.user("demo-a"));
+      assert.equal(downloads, 10);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("upgrade restores paused transient failures once, preserves contract quarantine and allows scoped manual retry", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+  const directory = mkdtempSync(join(tmpdir(), "rhino-retry-upgrade-"));
+  let store = new Store(join(directory, "test.sqlite"));
+  try {
+    let inbox = new EventInbox(store);
+    for (const category of ["MEDIA", "PROCESSING", "CONTRACT"]) {
+      const key = randomUUID();
+      inbox.receive(store.user("demo-a"), [{ eventId: key }], key);
+      store.db
+        .prepare(
+          "UPDATE api_event_inbox SET status='PAUSED',attempts=8,last_error=?,next_attempt=? WHERE event_key=?",
+        )
+        .run(category, Date.now(), key);
+    }
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    inbox = new EventInbox(store);
+    assert.equal(inbox.deferred("demo-a"), 2);
+    assert.equal(inbox.paused("demo-a"), 1);
+    const deadline = Date.now() + 3600000;
+    assert(
+      inbox
+        .diagnostics("demo-a")
+        .filter((r) => !r.paused)
+        .every(
+          (r) =>
+            r.attempts === 8 && Date.parse(r.nextAttemptAt || "") === deadline,
+        ),
+    );
+    t.mock.timers.setTime(deadline - 1);
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    inbox = new EventInbox(store);
+    assert.equal(inbox.due("demo-a", deadline - 1).length, 0);
+    assert.equal(inbox.due("demo-a", deadline).length, 2); // Restart did not reset the clock.
+    inbox.retry("demo-b");
+    assert.equal(inbox.deferred("demo-a"), 2);
+    inbox.retry("demo-a");
+    assert.equal(inbox.deferred("demo-a"), 0);
+    assert.equal(inbox.pending("demo-a"), 3);
+    assert(inbox.diagnostics("demo-a").every((r) => r.attempts === 8));
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("restart reconciles interrupted sends without changing saved responses, rejections or unsent attempts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rhino-crash-recovery-"));
+  let store = new Store(join(directory, "test.sqlite"));
+  const response = { submissionNo: "GSaccepted" };
+  try {
+    for (const id of ["sent", "legacy", "saved", "rejected", "unsent"]) {
+      store.startRequest("demo-a", id, "design", { clientRequestId: id });
+      if (id === "legacy") continue;
+      const attempt = store.attempts.begin("demo-a", id);
+      if (id === "sent") {
+        // Stop after the durable send marker; no catch/finally runs before reopen.
+        void attempt.send(() => new Promise(() => {}));
+      } else if (id === "saved") {
+        store.finishRequest("demo-a", id, response, "ACCEPTED");
+      } else if (id === "rejected") {
+        await assert.rejects(
+          attempt.send(async () => {
+            throw new AppError(409, "refused", undefined, "UPSTREAM_REJECTED");
+          }),
+        );
+        attempt.failed();
+      }
+    }
+    assert.equal(
+      store.requests("demo-a").find((r) => r.id === "sent")?.status,
+      "PENDING",
+    );
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    const rows = store.requests("demo-a");
+    for (const id of ["sent", "legacy"])
+      assert.equal(rows.find((r) => r.id === id)?.status, "UNCONFIRMED");
+    assert.equal(rows.find((r) => r.id === "saved")?.status, "ACCEPTED");
+    assert.deepEqual(rows.find((r) => r.id === "saved")?.response, response);
+    assert.equal(rows.find((r) => r.id === "rejected")?.status, "REJECTED");
+    assert.equal(rows.find((r) => r.id === "unsent")?.status, "PENDING");
+    store.close();
+    store = new Store(join(directory, "test.sqlite"));
+    assert.deepEqual(store.requests("demo-a"), rows);
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });

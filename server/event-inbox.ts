@@ -2,6 +2,8 @@ import type { User } from "../shared/types.ts";
 import { AppError } from "./errors.ts";
 import { digest, type Store } from "./store.ts";
 
+const slowRetryMs = 3600_000;
+
 // 游标表示已可靠接收；处理成功单独标记。异常事件保留原文，不伪装为已结算。
 export class EventInbox {
   private store: Store;
@@ -22,6 +24,12 @@ export class EventInbox {
         FOREIGN KEY(user_id,event_key) REFERENCES api_event_inbox(user_id,event_key)
       );
     `);
+    // Upgrade previously paused transient failures once; later restarts keep
+    // their due time, so restarting cannot postpone recovery indefinitely.
+    store.db
+      .prepare(`UPDATE api_event_inbox SET status='RETRY_LATER',next_attempt=MAX(next_attempt,?)
+      WHERE status='PAUSED' AND last_error IN ('MEDIA','PROCESSING')`)
+      .run(Date.now() + slowRetryMs);
   }
   receive(user: User, items: unknown[], cursor: string) {
     this.store.transaction(() => {
@@ -60,7 +68,7 @@ export class EventInbox {
     // 给重试保留名额，持续流入的新事件不能让旧失败项永久饥饿；也给新事件留出处理容量。
     const retries = this.store.db
       .prepare(
-        "SELECT event_key AS key,payload,attempts FROM api_event_inbox WHERE user_id=? AND status='PENDING' AND attempts>0 AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT 10",
+        "SELECT event_key AS key,payload,attempts FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','RETRY_LATER') AND attempts>0 AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT 10",
       )
       .all(userId, now);
     const fresh = this.store.db
@@ -88,7 +96,6 @@ export class EventInbox {
     now: number,
     cause?: unknown,
   ) {
-    const delay = Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6));
     const category =
       cause instanceof AppError
         ? cause.code === "RESULT_SAVE" && cause.status !== 400
@@ -102,12 +109,23 @@ export class EventInbox {
         )
         .get(userId, key)?.baseline || 0,
     );
-    const paused = attempts + 1 - baseline >= (category === "CONTRACT" ? 3 : 8);
+    const cycleAttempts = Math.max(0, attempts - baseline);
+    const paused = category === "CONTRACT" && cycleAttempts + 1 >= 3;
+    const deferred = category !== "CONTRACT" && cycleAttempts + 1 >= 8;
+    const delay = deferred
+      ? slowRetryMs
+      : Math.min(300_000, 5000 * 2 ** Math.min(cycleAttempts, 6));
     this.store.db
       .prepare(
         "UPDATE api_event_inbox SET status=?,attempts=attempts+1,next_attempt=?,last_error=? WHERE user_id=? AND event_key=?",
       )
-      .run(paused ? "PAUSED" : "PENDING", now + delay, category, userId, key);
+      .run(
+        paused ? "PAUSED" : deferred ? "RETRY_LATER" : "PENDING",
+        now + delay,
+        category,
+        userId,
+        key,
+      );
   }
   diagnostics(userId: string) {
     const labels: Record<string, string> = {
@@ -117,7 +135,7 @@ export class EventInbox {
     };
     return this.store.db
       .prepare(
-        "SELECT event_key,payload,status,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','PAUSED') AND attempts>0 ORDER BY next_attempt,rowid LIMIT 20",
+        "SELECT event_key,payload,status,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','RETRY_LATER','PAUSED') AND attempts>0 ORDER BY next_attempt,rowid LIMIT 20",
       )
       .all(userId)
       .map((row) => {
@@ -150,6 +168,9 @@ export class EventInbox {
   paused(userId: string) {
     return this.count(userId, "PAUSED");
   }
+  deferred(userId: string) {
+    return this.count(userId, "RETRY_LATER");
+  }
   private count(userId: string, status: string) {
     return Number(
       this.store.db
@@ -164,12 +185,12 @@ export class EventInbox {
       // Start a new bounded retry cycle without erasing lifetime failure counts.
       this.store.db
         .prepare(`INSERT INTO api_event_retry_cycles(user_id,event_key,baseline)
-        SELECT user_id,event_key,attempts FROM api_event_inbox WHERE user_id=? AND status='PAUSED'
+        SELECT user_id,event_key,attempts FROM api_event_inbox WHERE user_id=? AND status IN ('PAUSED','RETRY_LATER')
         ON CONFLICT(user_id,event_key) DO UPDATE SET baseline=excluded.baseline`)
         .run(userId);
       this.store.db
         .prepare(
-          "UPDATE api_event_inbox SET status='PENDING',next_attempt=0 WHERE user_id=? AND status IN ('PENDING','PAUSED')",
+          "UPDATE api_event_inbox SET status='PENDING',next_attempt=0 WHERE user_id=? AND status IN ('PENDING','RETRY_LATER','PAUSED')",
         )
         .run(userId);
     });
