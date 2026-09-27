@@ -81,15 +81,16 @@ export class ResultService {
     let fetchError: unknown;
     let processed = 0,
       budget = 20;
-    // Cooperative batch budget shared by both passes. Let an in-flight save
-    // finish, but do not chain more slow entries before yielding the slot.
-    const processingDeadline = Date.now() + 20_000;
-    const drain = async (retryLimit: number) => {
+    // Reserve separate time slices: one slow retry cannot consume the fresh
+    // event slice. Each slice lets its in-flight item finish before yielding.
+    const drain = async (retries: boolean) => {
+      const processingDeadline = Date.now() + 10_000;
       for (const item of this.inbox.due(
         user.id,
         Date.now(),
-        budget,
-        retryLimit,
+        retries ? Math.min(10, budget) : budget,
+        retries ? 10 : 0,
+        !retries,
       )) {
         if (Date.now() >= processingDeadline) break;
         budget--;
@@ -110,8 +111,8 @@ export class ResultService {
         }
       }
     };
-    // Already durable work must not wait behind a new network request.
-    await drain(10);
+    // Due retries get their reserved slice before fetching new events.
+    await drain(true);
     try {
       report = await this.pullEvents(user);
       this.eventSyncErrors.delete(user.id);
@@ -122,9 +123,9 @@ export class ResultService {
         "事件接收未完成，接收游标保留在上次成功页；本地已接收事件仍会重试处理，请检查凭据、网络与事件身份。",
       );
     }
-    // Use only the remaining capacity for fresh arrivals, never retry the same
-    // failure twice within one synchronization after a slow fetch.
-    await drain(0);
+    // Fresh arrivals and previously received, never-attempted events get their
+    // own time slice even after a slow retry or failed network fetch.
+    await drain(false);
     if (fetchError) throw fetchError;
     return { ...report, processed, pending: this.inbox.pending(user.id) };
   }

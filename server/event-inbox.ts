@@ -80,7 +80,13 @@ export class EventInbox {
       this.store.saveApiEventCursor(user.id, cursor);
     });
   }
-  due(userId: string, now: number, limit = 20, retryLimit = 10) {
+  due(
+    userId: string,
+    now: number,
+    limit = 20,
+    retryLimit = 10,
+    includeFresh = true,
+  ) {
     this.expire(now, userId);
     // 给重试保留名额，持续流入的新事件不能让旧失败项永久饥饿；也给新事件留出处理容量。
     const retries = this.store.db
@@ -92,7 +98,7 @@ export class EventInbox {
       .prepare(
         "SELECT event_key AS key,payload,attempts FROM api_event_inbox WHERE user_id=? AND status='PENDING' AND attempts=0 ORDER BY rowid LIMIT ?",
       )
-      .all(userId, limit - retries.length);
+      .all(userId, includeFresh ? limit - retries.length : 0);
     return [...retries, ...fresh].map((row) => ({
       key: String(row.key),
       value: JSON.parse(String(row.payload)) as unknown,

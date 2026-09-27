@@ -201,10 +201,24 @@ test("processing before and after fetch shares one twenty-event budget and keeps
   });
   try {
     results.inbox.receive(user, old, old[19].eventId);
+    store.db
+      .prepare("UPDATE api_event_inbox SET attempts=1 WHERE user_id=?")
+      .run(user.id);
     const first = await results.syncEvents(user);
     assert.equal(first.processed, 20);
     assert.equal(first.pending, 20);
     assert.equal(store.platformCosts(user.id).length, 20);
+    assert.equal(store.processed(old[9].eventId, user.id), true);
+    assert.equal(
+      store.processed(old[10].eventId, user.id),
+      false,
+      "retry limit is still ten",
+    );
+    assert.equal(
+      store.processed(arrivals[9].eventId, user.id),
+      true,
+      "fresh events keep reserved capacity",
+    );
     assert.equal((await results.syncEvents(user)).processed, 20);
     assert.equal(store.platformCosts(user.id).length, 40);
     results.inbox.receive(user, [...old, ...arrivals], arrivals[19].eventId);
@@ -215,7 +229,136 @@ test("processing before and after fetch shares one twenty-event budget and keeps
   }
 });
 
-test("both processing passes share the twenty-second budget and untouched items remain pending", async (t) => {
+test("repeated ninety-second media retries cannot starve fresh cost and sale events", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+  const store = new Store(":memory:"),
+    user = store.user("demo-a");
+  let saves = 0,
+    page: unknown[] = [],
+    cursor = "";
+  const api = new MerchantClient(
+    "https://fixture.invalid",
+    "fixture",
+    async () =>
+      Response.json({
+        code: 0,
+        data: { items: page, hasMore: false, nextCursor: cursor },
+      }),
+  );
+  const results = new ResultService(store, api, {
+    save: async () => {
+      saves++;
+      t.mock.timers.setTime(Date.now() + 90000);
+      throw resultSaveError(504, "persistent CDN timeout");
+    },
+  });
+  try {
+    const retries = Array.from({ length: 5 }, (_, i) => event(`GS-retry-${i}`));
+    results.inbox.receive(user, retries, retries[4].eventId);
+    store.db
+      .prepare("UPDATE api_event_inbox SET attempts=1 WHERE user_id=?")
+      .run(user.id);
+    for (let round = 0; round < 4; round++) {
+      const quote = {
+        quoteId: randomUUID(),
+        clientRequestId: randomUUID(),
+        externalUserId: user.externalUserId,
+        estimatedCredits: 1,
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        saleItems: [{ itemId: randomUUID(), credits: 1 }],
+      };
+      store.sales.approvalPolicy(user.id, quote.clientRequestId);
+      store.sales.freezeAudit(user, quote);
+      const cost = {
+        ...event("GS-cost"),
+        eventType: "credits.debited",
+        data: { delta: -1 },
+      };
+      const itemId = quote.saleItems[0].itemId;
+      const sale = {
+        ...event("GS-sale"),
+        eventType: "credits.sale_debited",
+        data: {
+          quoteId: quote.quoteId,
+          clientRequestId: quote.clientRequestId,
+          itemId,
+          amount: 1,
+          taskNo: `AI-sale-${round}`,
+          settlementId: `sale:${itemId}:debit`,
+        },
+      };
+      page = [cost, sale];
+      cursor = sale.eventId;
+      const report = await results.syncEvents(user);
+      assert.equal(saves, round + 1);
+      assert.equal(report.processed, 2);
+      assert.equal(store.platformCosts(user.id).length, round + 1);
+      assert.equal(store.sales.records(user.id).length, round + 1);
+      assert(
+        store.sales
+          .records(user.id)
+          .every((record) => record.status === "RECORDED"),
+      );
+      assert.equal(results.inbox.paused(user.id), 0);
+      assert.equal(store.apiEventCursor(user.id), cursor);
+    }
+    assert.equal(store.user(user.id).credits, 0);
+    assert.deepEqual(store.ledger(user.id), []);
+    assert.deepEqual(store.platformCosts("demo-b"), []);
+  } finally {
+    store.close();
+  }
+});
+
+test("slow retries and slow fresh events each progress once per round, including after fetch failure", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+  const store = new Store(":memory:"),
+    user = store.user("demo-a");
+  const retry = event("GS-retry"),
+    fresh = [event("GS-fresh-1"), event("GS-fresh-2")];
+  const starts: string[] = [];
+  const api = new MerchantClient(
+    "https://fixture.invalid",
+    "fixture",
+    async () => {
+      throw new Error("network down");
+    },
+  );
+  const results = new ResultService(store, api, {
+    save: async (_url, scope) => {
+      const key = scope.split(":")[2];
+      starts.push(key);
+      t.mock.timers.setTime(Date.now() + 90000);
+      throw resultSaveError(504, "CDN timeout");
+    },
+  });
+  try {
+    results.inbox.receive(user, [retry, ...fresh], fresh[1].eventId);
+    store.db
+      .prepare("UPDATE api_event_inbox SET attempts=1 WHERE event_key=?")
+      .run(retry.eventId);
+    await assert.rejects(results.syncEvents(user), /无响应/);
+    assert.deepEqual(starts, [retry.eventId, fresh[0].eventId]);
+    await assert.rejects(results.syncEvents(user), /无响应/);
+    assert.deepEqual(starts, [
+      retry.eventId,
+      fresh[0].eventId,
+      retry.eventId,
+      fresh[1].eventId,
+    ]);
+    assert.equal(results.inbox.paused(user.id), 0);
+    assert.equal(
+      results.inbox
+        .diagnostics(user.id)
+        .find((row) => row.eventKey === fresh[0].eventId)?.attempts,
+      1,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("fresh processing has its own ten-second slice and untouched items remain pending", async (t) => {
   const base = 1_800_000_000_000;
   t.mock.timers.enable({ apis: ["Date"], now: base });
   const store = new Store(":memory:"),
@@ -249,15 +392,15 @@ test("both processing passes share the twenty-second budget and untouched items 
   try {
     results.inbox.receive(user, old, old[4].eventId);
     const report = await results.syncEvents(user);
-    assert.equal(saves, 2);
-    assert.equal(fetchedAt, base + 20000);
-    assert.equal(report.processed, 2);
+    assert.equal(saves, 1);
+    assert.equal(fetchedAt, base);
+    assert.equal(report.processed, 1);
     assert.equal(report.received, 1);
-    assert.equal(report.pending, 4);
+    assert.equal(report.pending, 5);
     assert.equal(
       store.platformCosts(user.id).length,
       0,
-      "fetch must not reset the processing budget",
+      "a slow fresh item must not bypass its own time budget",
     );
     assert.equal(
       store.apiEventCursor(user.id),
@@ -265,7 +408,7 @@ test("both processing passes share the twenty-second budget and untouched items 
       "new events still persist after processing yields",
     );
     const remaining = results.inbox.due(user.id, Date.now());
-    assert.equal(remaining.length, 4);
+    assert.equal(remaining.length, 5);
     assert(
       remaining.every((item) => item.attempts === 0),
       "not starting an item is not a processing failure",
