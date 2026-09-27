@@ -131,6 +131,7 @@ export async function startDemo(
     Date.now,
     (userId) => results.syncState.active(userId),
     (userId) => store.user(userId),
+    (userId, now) => results.inbox.nextRetryAt(userId, now),
   );
   results.onActivity = (userId) => poller.wake(userId);
   const pollTimer = config.public.apiReady

@@ -80,24 +80,43 @@ export class EventInbox {
       this.store.saveApiEventCursor(user.id, cursor);
     });
   }
-  due(userId: string, now: number) {
+  due(userId: string, now: number, limit = 20, retryLimit = 10) {
     this.expire(now, userId);
     // 给重试保留名额，持续流入的新事件不能让旧失败项永久饥饿；也给新事件留出处理容量。
     const retries = this.store.db
       .prepare(
-        "SELECT event_key AS key,payload,attempts FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','RETRY_LATER') AND attempts>0 AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT 10",
+        "SELECT event_key AS key,payload,attempts FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','RETRY_LATER') AND attempts>0 AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT ?",
       )
-      .all(userId, now);
+      .all(userId, now, Math.min(limit, retryLimit));
     const fresh = this.store.db
       .prepare(
         "SELECT event_key AS key,payload,attempts FROM api_event_inbox WHERE user_id=? AND status='PENDING' AND attempts=0 ORDER BY rowid LIMIT ?",
       )
-      .all(userId, 20 - retries.length);
+      .all(userId, limit - retries.length);
     return [...retries, ...fresh].map((row) => ({
       key: String(row.key),
       value: JSON.parse(String(row.payload)) as unknown,
       attempts: Number(row.attempts),
     }));
+  }
+  ready(userId: string, key: string, now: number) {
+    return Boolean(
+      this.store.db
+        .prepare(`SELECT 1 FROM api_event_inbox i
+      JOIN api_event_retry_windows w ON w.user_id=i.user_id AND w.event_key=i.event_key
+      WHERE i.user_id=? AND i.event_key=? AND i.status IN ('PENDING','RETRY_LATER')
+        AND i.next_attempt<=? AND w.deadline>?`)
+        .get(userId, key, now, now),
+    );
+  }
+  nextRetryAt(userId: string, now: number) {
+    const row = this.store.db
+      .prepare(`SELECT MIN(i.next_attempt) AS at FROM api_event_inbox i
+      JOIN api_event_retry_windows w ON w.user_id=i.user_id AND w.event_key=i.event_key
+      WHERE i.user_id=? AND i.status IN ('PENDING','RETRY_LATER') AND i.attempts>0
+        AND w.deadline>? AND i.next_attempt<w.deadline`)
+      .get(userId, now);
+    return row?.at == null ? undefined : Number(row.at);
   }
   complete(userId: string, key: string) {
     this.store.db

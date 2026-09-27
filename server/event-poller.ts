@@ -70,18 +70,21 @@ export class EventPoller {
   private now: () => number;
   private active: (userId: string) => boolean;
   private findUser?: (userId: string) => User;
+  private nextRetryAt?: (userId: string, now: number) => number | undefined;
   constructor(
     users: () => User[],
     sync: (user: User) => Promise<EventSyncReport>,
     now = Date.now,
     active: (userId: string) => boolean = () => false,
     findUser?: (userId: string) => User,
+    nextRetryAt?: (userId: string, now: number) => number | undefined,
   ) {
     this.users = users;
     this.sync = sync;
     this.now = now;
     this.active = active;
     this.findUser = findUser;
+    this.nextRetryAt = nextRetryAt;
   }
   wake(userId: string) {
     if (this.stopped) return;
@@ -144,12 +147,20 @@ export class EventPoller {
           } catch {
             delay = Math.min(60_000, Math.max(10_000, schedule.delay * 2));
           }
-          if (this.schedules.get(user.id) === schedule)
+          if (this.schedules.get(user.id) === schedule) {
+            const now = this.now();
+            const retryAt = this.nextRetryAt?.(user.id, now);
             this.schedules.set(user.id, {
               user,
               delay,
-              due: this.now() + delay,
+              // Retain the normal idle/error backoff, but wake for a persisted
+              // retry earlier than that. No high-frequency scan of all users.
+              due:
+                retryAt === undefined
+                  ? now + delay
+                  : Math.min(now + delay, Math.max(now, retryAt)),
             });
+          }
         })
         .finally(() => {
           this.running.delete(user.id);

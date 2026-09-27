@@ -79,6 +79,35 @@ export class ResultService {
   private async synchronize(user: User): Promise<EventSyncReport> {
     let report = { received: 0, hasMore: false };
     let fetchError: unknown;
+    let processed = 0,
+      budget = 20;
+    const drain = async (retryLimit: number) => {
+      for (const item of this.inbox.due(
+        user.id,
+        Date.now(),
+        budget,
+        retryLimit,
+      )) {
+        budget--;
+        // Earlier media saves may take time: recheck before each new attempt.
+        if (!this.inbox.ready(user.id, item.key, Date.now())) continue;
+        try {
+          await this.processEvent(user, item.value);
+          this.inbox.complete(user.id, item.key);
+          processed++;
+        } catch (cause) {
+          this.inbox.failed(
+            user.id,
+            item.key,
+            item.attempts,
+            Date.now(),
+            cause,
+          );
+        }
+      }
+    };
+    // Already durable work must not wait behind a new network request.
+    await drain(10);
     try {
       report = await this.pullEvents(user);
       this.eventSyncErrors.delete(user.id);
@@ -89,16 +118,9 @@ export class ResultService {
         "事件接收未完成，接收游标保留在上次成功页；本地已接收事件仍会重试处理，请检查凭据、网络与事件身份。",
       );
     }
-    let processed = 0;
-    for (const item of this.inbox.due(user.id, Date.now())) {
-      try {
-        await this.processEvent(user, item.value);
-        this.inbox.complete(user.id, item.key);
-        processed++;
-      } catch (cause) {
-        this.inbox.failed(user.id, item.key, item.attempts, Date.now(), cause);
-      }
-    }
+    // Use only the remaining capacity for fresh arrivals, never retry the same
+    // failure twice within one synchronization after a slow fetch.
+    await drain(0);
     if (fetchError) throw fetchError;
     return { ...report, processed, pending: this.inbox.pending(user.id) };
   }
