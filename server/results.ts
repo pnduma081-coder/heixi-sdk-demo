@@ -81,6 +81,9 @@ export class ResultService {
     let fetchError: unknown;
     let processed = 0,
       budget = 20;
+    // Cooperative batch budget shared by both passes. Let an in-flight save
+    // finish, but do not chain more slow entries before yielding the slot.
+    const processingDeadline = Date.now() + 20_000;
     const drain = async (retryLimit: number) => {
       for (const item of this.inbox.due(
         user.id,
@@ -88,6 +91,7 @@ export class ResultService {
         budget,
         retryLimit,
       )) {
+        if (Date.now() >= processingDeadline) break;
         budget--;
         // Earlier media saves may take time: recheck before each new attempt.
         if (!this.inbox.ready(user.id, item.key, Date.now())) continue;
