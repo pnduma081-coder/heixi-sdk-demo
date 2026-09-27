@@ -23,7 +23,7 @@ export class Operations {
       clientRequestId,
       "sdkApproval",
       { quoteId, clientRequestId },
-      async () => {
+      async (send) => {
         const quote = this.confirmQuote(
           user,
           await this.api.request(
@@ -34,15 +34,17 @@ export class Operations {
           quoteId,
         );
         const approve = () =>
-          this.api.request(
-            `/open/sdk/generation-quotes/${quoteId}/approve`,
-            user.externalUserId,
-            {
-              body: {
-                clientRequestId,
-                estimatedCredits: quote.estimatedCredits,
+          send(() =>
+            this.api.request(
+              `/open/sdk/generation-quotes/${quoteId}/approve`,
+              user.externalUserId,
+              {
+                body: {
+                  clientRequestId,
+                  estimatedCredits: quote.estimatedCredits,
+                },
               },
-            },
+            ),
           );
         if (policy === "AUDIT_ONLY") {
           this.store.sales.freezeAudit(user, quote);
@@ -75,18 +77,20 @@ export class Operations {
     if (mode === "direct") {
       if (this.api.auth.version !== "0.4.0")
         throw new AppError(400, "直接生成示例要求显式 0.4.0 协议与 AK/SK");
-      return this.saved(user, id, operation, body, async () => {
+      return this.saved(user, id, operation, body, async (send) => {
         // 已受理旧请求由 saved 返回原响应；不改写同一请求号的原参数。
         if (operation === "design" && body.contentLanguage === "NONE")
           throw new AppError(
             400,
             "0.4.0 设计接口须填写实际内容语言（如 zh-CN）；请核对原请求状态后用新请求号提交，不能使用 NONE",
           );
-        return this.api.request(path, user.externalUserId, { body });
+        return send(() =>
+          this.api.request(path, user.externalUserId, { body }),
+        );
       });
     }
     // 仅恢复历史已记录的报价请求，不为新 API 请求创建报价或充值流程。
-    return this.saved(user, id, operation, body, async () => {
+    return this.saved(user, id, operation, body, async (send) => {
       const quote = this.store.sales.quote(user.id, id);
       if (!quote)
         throw new AppError(
@@ -94,23 +98,27 @@ export class Operations {
           "旧报价请求缺少冻结快照，请先核对原受理状态，不能改用直接生成重提",
         );
       await this.store.sales.withReservation(user, quote, () =>
-        this.api.request(
-          `/open/generation-quotes/${quote.quoteId}/approve`,
-          user.externalUserId,
-          {
-            body: {
-              clientRequestId: id,
-              estimatedCredits: quote.estimatedCredits,
+        send(() =>
+          this.api.request(
+            `/open/generation-quotes/${quote.quoteId}/approve`,
+            user.externalUserId,
+            {
+              body: {
+                clientRequestId: id,
+                estimatedCredits: quote.estimatedCredits,
+              },
             },
-          },
+          ),
         ),
       );
       // The approval is already durable. A later submit failure must never
       // rewrite it as a rejected approval or release its reservation.
-      return this.api.request(
-        `/open/generation-quotes/${quote.quoteId}/submit`,
-        user.externalUserId,
-        { body: {} },
+      return send(() =>
+        this.api.request(
+          `/open/generation-quotes/${quote.quoteId}/submit`,
+          user.externalUserId,
+          { body: {} },
+        ),
       );
     });
   }
@@ -131,7 +139,9 @@ export class Operations {
     id: string,
     operation: string,
     body: JsonObject,
-    work: () => Promise<unknown>,
+    work: (
+      send: (work: () => Promise<unknown>) => Promise<unknown>,
+    ) => Promise<unknown>,
   ) {
     const old = this.store.startRequest(user.id, id, operation, body);
     if (old !== undefined) {
@@ -145,7 +155,8 @@ export class Operations {
     const key = `${user.id}:${id}`;
     const pending = this.pending.get(key);
     if (pending) return pending;
-    const promise = work()
+    const attempt = this.store.attempts.begin(user.id, id);
+    const promise = work(attempt.send)
       .then((result) => {
         this.store.finishRequest(
           user.id,
@@ -153,10 +164,11 @@ export class Operations {
           result,
           operation === "sdkApproval" ? "APPROVED" : "ACCEPTED",
         );
+        attempt.complete();
         return result;
       })
       .catch((error) => {
-        this.store.finishRequest(user.id, id, undefined, "UNCONFIRMED");
+        attempt.failed();
         throw error;
       })
       .finally(() => this.pending.delete(key));

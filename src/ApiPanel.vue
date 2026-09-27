@@ -10,6 +10,7 @@ import {
   imageOptions,
   videoOptions,
 } from "./model-options.ts";
+import { requestStatusLabel } from "./request-status.ts";
 import { ResultWatcher } from "./result-watcher.ts";
 
 const props = defineProps<{
@@ -78,8 +79,8 @@ async function execute() {
       submissionNo.value = no;
       startPolling();
     }
-    emit("refresh");
   });
+  if (!lifetime.signal.aborted) emit("refresh");
 }
 function freshId() {
   void run(async () => {
@@ -249,6 +250,6 @@ onBeforeUnmount(() => {
     <p v-if="savingState === 'paused'" class="hint">保存状态自动检查已暂停，后台仍继续处理；可手动刷新最终状态。</p>
     <p v-if="pollPaused" class="hint">自动查询已暂停（达到 10 分钟或连续失败 3 次），可手动刷新或重新开始查询。</p>
     <h3>已保存的生成请求</h3>
-    <table><thead><tr><th>请求号</th><th>操作</th><th>提交状态</th><th></th></tr></thead><tbody><tr v-for="item in requests.filter(item => item.operation !== 'sdkApproval')" :key="item.id"><td>{{ item.id }}</td><td>{{ item.operation }}</td><td>{{ item.status }}</td><td><button :disabled="busy" @click="restore(item)">恢复原请求</button></td></tr></tbody></table>
+    <table><thead><tr><th>请求号</th><th>操作</th><th>提交状态</th><th></th></tr></thead><tbody><tr v-for="item in requests.filter(item => item.operation !== 'sdkApproval')" :key="item.id"><td>{{ item.id }}</td><td>{{ item.operation }}</td><td>{{ requestStatusLabel(item.status) }}</td><td><button :disabled="busy" @click="restore(item)">恢复原请求</button></td></tr></tbody></table>
   </section>
 </template>

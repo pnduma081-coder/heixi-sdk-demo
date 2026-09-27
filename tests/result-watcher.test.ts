@@ -42,7 +42,7 @@ test("terminal result watcher reads only local task, stops on save and coalesces
       calls++;
       return {
         ok: true,
-        json: async () => ({ result: calls < 3 ? null : saved }),
+        json: async () => ({ result: calls < 19 ? null : saved }),
       } as Response;
     },
   );
@@ -62,17 +62,17 @@ test("terminal result watcher reads only local task, stops on save and coalesces
   await flush();
   watcher.start("GS-one");
   assert.equal(calls, 1);
-  t.mock.timers.tick(3000);
-  await flush();
-  t.mock.timers.tick(3000);
-  await flush();
-  assert.equal(calls, 3);
+  for (let i = 0; i < 18; i++) {
+    t.mock.timers.tick(5000);
+    await flush();
+  }
+  assert.equal(calls, 19);
   assert.equal(refreshes, 1);
   assert.equal(state, "complete");
   watcher.start("GS-one");
   t.mock.timers.tick(600000);
   await flush();
-  assert.equal(calls, 3);
+  assert.equal(calls, 19);
 });
 
 test("result watcher pauses after bounded reads, after hidden deadline, and ignores late previous results", async (t) => {
@@ -113,23 +113,23 @@ test("result watcher pauses after bounded reads, after hidden deadline, and igno
   t.after(() => watcher.dispose());
   watcher.start("GS-one");
   await flush();
-  for (let i = 0; i < 20; i++) {
-    t.mock.timers.tick(3000);
+  for (let i = 0; i < 120; i++) {
+    t.mock.timers.tick(5000);
     await flush();
   }
-  assert.equal(calls, 20);
+  assert.equal(calls, 120);
   assert.equal(state, "paused");
   watcher.start("GS-one");
   await flush();
-  assert.equal(calls, 20);
+  assert.equal(calls, 120);
   watcher.stop();
   document.hidden = true;
   watcher.start("GS-two");
-  t.mock.timers.tick(60001);
+  t.mock.timers.tick(600001);
   document.hidden = false;
   watcher.visibilityChanged();
   await flush();
-  assert.equal(calls, 20);
+  assert.equal(calls, 120);
   assert.equal(state, "paused");
   watcher.stop();
   block = true;

@@ -27,8 +27,9 @@ export class ResultWatcher {
       state: options.state,
       error: options.error,
       hidden: () => document.hidden,
-      maxElapsedMs: 60_000,
-      maxReads: 20,
+      maxElapsedMs: 600_000,
+      maxReads: 120,
+      intervalMs: 5000,
     });
   }
   start(no: string) {

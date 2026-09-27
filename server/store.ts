@@ -12,6 +12,7 @@ import type {
   User,
 } from "../shared/types.ts";
 import { AppError, BusinessError } from "./errors.ts";
+import { RequestAttempts } from "./request-attempts.ts";
 import { SaleLedger } from "./sale-ledger.ts";
 
 const userColumns = "id, name, external_user_id AS externalUserId, credits";
@@ -30,6 +31,7 @@ export const digest = (value: unknown) =>
 export class Store {
   db: DatabaseSync;
   sales: SaleLedger;
+  attempts: RequestAttempts;
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -64,6 +66,7 @@ export class Store {
         }
       });
       this.sales = new SaleLedger(this);
+      this.attempts = new RequestAttempts(this);
     } catch (error) {
       this.db.close();
       throw error;

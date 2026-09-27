@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveConfig } from "../server/config.ts";
-import { AppError, resultSaveError } from "../server/errors.ts";
+import { AppError } from "../server/errors.ts";
 import { createHandler } from "../server/http.ts";
 import { createFrontendServer } from "../server/index.ts";
 import { MerchantClient } from "../server/merchant.ts";
@@ -151,13 +151,24 @@ results.inbox.receive(
   ],
   eventId,
 );
-results.inbox.failed(
-  user.id,
-  eventId,
-  0,
-  Date.now(),
-  resultSaveError(502, "synthetic private detail"),
-);
+for (let attempt = 0; attempt < 3; attempt++) {
+  results.inbox.failed(
+    user.id,
+    eventId,
+    attempt,
+    Date.now(),
+    new AppError(400, "synthetic malformed event"),
+  );
+}
+for (const status of ["NOT_SENT", "REJECTED"]) {
+  const id = `fixture-${status}`;
+  store.startRequest(user.id, id, "design", {
+    clientRequestId: id,
+    feature: "MAIN_IMAGE",
+    context: { example: "api-test" },
+  });
+  store.finishRequest(user.id, id, undefined, status);
+}
 const handler = createHandler(
   config,
   store,

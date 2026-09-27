@@ -77,7 +77,8 @@ export type SessionState = {
     category: string;
     reason: string;
     attempts: number;
-    nextAttemptAt: string;
+    paused: boolean;
+    nextAttemptAt: string | null;
     submissionNo?: string;
   }>;
 };

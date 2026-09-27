@@ -65,6 +65,9 @@ export class ResultService {
         count
           ? `${count} 条事件已保存在本地但尚未处理成功；后续事件继续同步，请重试或排查，勿视为已结算。`
           : "",
+        this.inbox.paused(userId)
+          ? `${this.inbox.paused(userId)} 条事件已暂停自动重试，原文保留；请排查原因后手动重试，勿视为已结算。`
+          : "",
       ]
         .filter(Boolean)
         .join("\n") || undefined

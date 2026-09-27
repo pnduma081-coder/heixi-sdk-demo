@@ -245,22 +245,31 @@ export function createHandler(
         results.onActivity?.(user.id);
         json(res, { signature });
       } else if (path === "/api/sdk/approve") {
-        results.onActivity?.(user.id);
-        json(res, await operations.approve(user, body));
+        try {
+          json(res, await operations.approve(user, body));
+        } finally {
+          if (results.syncState.active(user.id)) results.onActivity?.(user.id);
+        }
       } else if (path === "/api/sdk/result") {
         await results.sdk(user, uuid(body.eventId));
         json(res, { received: true });
       } else if (path === "/api/call") {
-        if (["design", "apparel", "video"].includes(String(body.operation)))
-          results.onActivity?.(user.id);
-        json(
-          res,
-          await operations.call(
-            user,
-            string(body.operation),
-            object(body.params),
-          ),
-        );
+        try {
+          json(
+            res,
+            await operations.call(
+              user,
+              string(body.operation),
+              object(body.params),
+            ),
+          );
+        } finally {
+          if (
+            ["design", "apparel", "video"].includes(String(body.operation)) &&
+            results.syncState.active(user.id)
+          )
+            results.onActivity?.(user.id);
+        }
       } else throw new AppError(404, "接口不存在");
     } catch (error) {
       errorResponse(res, error);

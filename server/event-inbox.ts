@@ -16,6 +16,11 @@ export class EventInbox {
         PRIMARY KEY(user_id,event_key)
       );
       CREATE INDEX IF NOT EXISTS api_event_inbox_due ON api_event_inbox(user_id,status,next_attempt);
+      CREATE TABLE IF NOT EXISTS api_event_retry_cycles(
+        user_id TEXT NOT NULL, event_key TEXT NOT NULL, baseline INTEGER NOT NULL,
+        PRIMARY KEY(user_id,event_key),
+        FOREIGN KEY(user_id,event_key) REFERENCES api_event_inbox(user_id,event_key)
+      );
     `);
   }
   receive(user: User, items: unknown[], cursor: string) {
@@ -84,20 +89,25 @@ export class EventInbox {
     cause?: unknown,
   ) {
     const delay = Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6));
+    const category =
+      cause instanceof AppError
+        ? cause.code === "RESULT_SAVE" && cause.status !== 400
+          ? "MEDIA"
+          : "CONTRACT"
+        : "PROCESSING";
+    const baseline = Number(
+      this.store.db
+        .prepare(
+          "SELECT baseline FROM api_event_retry_cycles WHERE user_id=? AND event_key=?",
+        )
+        .get(userId, key)?.baseline || 0,
+    );
+    const paused = attempts + 1 - baseline >= (category === "CONTRACT" ? 3 : 8);
     this.store.db
       .prepare(
-        "UPDATE api_event_inbox SET attempts=attempts+1,next_attempt=?,last_error=? WHERE user_id=? AND event_key=?",
+        "UPDATE api_event_inbox SET status=?,attempts=attempts+1,next_attempt=?,last_error=? WHERE user_id=? AND event_key=?",
       )
-      .run(
-        now + delay,
-        cause instanceof AppError
-          ? cause.code === "RESULT_SAVE" && cause.status !== 400
-            ? "MEDIA"
-            : "CONTRACT"
-          : "PROCESSING",
-        userId,
-        key,
-      );
+      .run(paused ? "PAUSED" : "PENDING", now + delay, category, userId, key);
   }
   diagnostics(userId: string) {
     const labels: Record<string, string> = {
@@ -107,7 +117,7 @@ export class EventInbox {
     };
     return this.store.db
       .prepare(
-        "SELECT event_key,payload,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND status='PENDING' AND attempts>0 ORDER BY next_attempt,rowid LIMIT 20",
+        "SELECT event_key,payload,status,attempts,next_attempt,last_error FROM api_event_inbox WHERE user_id=? AND status IN ('PENDING','PAUSED') AND attempts>0 ORDER BY next_attempt,rowid LIMIT 20",
       )
       .all(userId)
       .map((row) => {
@@ -123,7 +133,11 @@ export class EventInbox {
           category,
           reason: labels[category],
           attempts: Number(row.attempts),
-          nextAttemptAt: new Date(Number(row.next_attempt)).toISOString(),
+          paused: row.status === "PAUSED",
+          nextAttemptAt:
+            row.status === "PAUSED"
+              ? null
+              : new Date(Number(row.next_attempt)).toISOString(),
           ...(typeof no === "string" && /^GS[A-Za-z0-9-]{1,62}$/.test(no)
             ? { submissionNo: no }
             : {}),
@@ -131,19 +145,33 @@ export class EventInbox {
       });
   }
   pending(userId: string) {
+    return this.count(userId, "PENDING");
+  }
+  paused(userId: string) {
+    return this.count(userId, "PAUSED");
+  }
+  private count(userId: string, status: string) {
     return Number(
       this.store.db
         .prepare(
-          "SELECT COUNT(*) AS count FROM api_event_inbox WHERE user_id=? AND status='PENDING'",
+          "SELECT COUNT(*) AS count FROM api_event_inbox WHERE user_id=? AND status=?",
         )
-        .get(userId)?.count || 0,
+        .get(userId, status)?.count || 0,
     );
   }
   retry(userId: string) {
-    this.store.db
-      .prepare(
-        "UPDATE api_event_inbox SET next_attempt=0 WHERE user_id=? AND status='PENDING'",
-      )
-      .run(userId);
+    this.store.transaction(() => {
+      // Start a new bounded retry cycle without erasing lifetime failure counts.
+      this.store.db
+        .prepare(`INSERT INTO api_event_retry_cycles(user_id,event_key,baseline)
+        SELECT user_id,event_key,attempts FROM api_event_inbox WHERE user_id=? AND status='PAUSED'
+        ON CONFLICT(user_id,event_key) DO UPDATE SET baseline=excluded.baseline`)
+        .run(userId);
+      this.store.db
+        .prepare(
+          "UPDATE api_event_inbox SET status='PENDING',next_attempt=0 WHERE user_id=? AND status IN ('PENDING','PAUSED')",
+        )
+        .run(userId);
+    });
   }
 }

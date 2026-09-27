@@ -219,6 +219,9 @@ test("event diagnostics persist safe categories, attempts and dates and remain u
       1000,
       resultSaveError(502, "secret URL sk-private"),
     );
+    store.db
+      .prepare("UPDATE api_event_inbox SET attempts=2 WHERE event_key=?")
+      .run(ids[1]);
     inbox.failed(
       user.id,
       ids[1],
@@ -236,8 +239,16 @@ test("event diagnostics persist safe categories, attempts and dates and remain u
       new Set(rows.map((r) => r.category)),
       new Set(["MEDIA", "CONTRACT", "PROCESSING"]),
     );
-    assert(rows.every((r) => r.attempts === 1));
-    assert(rows.every((r) => Date.parse(r.nextAttemptAt) > 1000));
+    assert(
+      rows.every((r) => r.attempts === (r.category === "CONTRACT" ? 3 : 1)),
+    );
+    assert(
+      rows.every((r) =>
+        r.paused
+          ? r.nextAttemptAt === null
+          : r.nextAttemptAt !== null && Date.parse(r.nextAttemptAt) > 1000,
+      ),
+    );
     assert(!JSON.stringify(rows).includes("private"));
     assert.deepEqual(inbox.diagnostics("demo-b"), []);
     inbox.complete(user.id, ids[0]);

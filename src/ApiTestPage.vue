@@ -16,6 +16,7 @@ import {
 } from "./api-test.ts";
 import EventFailures from "./EventFailures.vue";
 import { GenerationPoller } from "./generation-poller.ts";
+import { requestStatusLabel } from "./request-status.ts";
 import { ResultWatcher } from "./result-watcher.ts";
 
 const props = defineProps<{
@@ -88,6 +89,11 @@ const statusText = computed(() => {
       : "平台已结束生成，正在等待本地保存结果";
   if (submissionNo.value) return "已受理，正在生成；结果保存后显示";
   if (busy.value && originalRequest.value) return "正在提交生成请求，请稍候";
+  const requestStatus = requests.value.find(
+    (item) => item.id === activeId.value,
+  )?.status;
+  if (requestStatus === "NOT_SENT") return "请求未发送，请修正参数后开始新测试";
+  if (requestStatus === "REJECTED") return "平台已拒绝本次请求，请检查错误原因";
   if (originalRequest.value)
     return submitted.value
       ? "提交已返回，正在确认受理状态"
@@ -259,18 +265,6 @@ function newTest() {
   statusError.value = "";
   pollPaused.value = false;
 }
-async function retryEvents() {
-  try {
-    await api("/api/events/retry", {
-      body: {},
-      userId: actorId,
-      signal: lifetime.signal,
-    });
-    if (!lifetime.signal.aborted) emit("refresh");
-  } catch (cause) {
-    if (!lifetime.signal.aborted) statusError.value = message(cause);
-  }
-}
 function stopPolling() {
   resultWatcher.stop();
   localResult.value = undefined;
@@ -317,8 +311,8 @@ onBeforeUnmount(() => {
         <p v-if="submissionNo" class="hint">受理号：{{ submissionNo }}</p>
         <p class="hint">服务器轮询事件或收到可选回调后保存图片，刷新页面后仍会保留。</p>
         <p v-if="finalStatus?.credits" class="hint">商户实际消费：{{ asObject(finalStatus.credits).charged }} · 退款：{{ asObject(finalStatus.credits).refunded }} · 净消费：{{ asObject(finalStatus.credits).net }}（不是用户售价）</p>
-        <p v-if="session.eventSyncError" class="error">{{ session.eventSyncError }} <button type="button" @click="retryEvents">重试待处理事件</button></p>
-        <EventFailures :failures="session.eventFailures" />
+        <p v-if="session.eventSyncError" class="error">{{ session.eventSyncError }}</p>
+        <EventFailures :failures="session.eventFailures" :user-id="session.user.id" :issue="session.eventSyncError" @refresh="emit('refresh')" />
         <p v-if="pollPaused" class="hint">自动状态查询已暂停（达到时限或连续失败），后台事件同步仍在运行。<button type="button" @click="startPolling">继续查询</button></p>
         <p v-if="statusError" class="error" role="alert">{{ statusError }}</p>
         <p v-if="!saved && session.generationFailure?.submissionNo === submissionNo" class="error" role="alert">最近一次结果未保存：{{ session.generationFailure.reason }}（{{ new Date(session.generationFailure.at).toLocaleString() }}）。请保留原请求，等待服务端重试同步。</p>
@@ -331,6 +325,6 @@ onBeforeUnmount(() => {
         </article>
       </section>
     </div>
-    <section v-if="requests.length" class="surface api-test-history"><h2>测试请求</h2><table><thead><tr><th>时间</th><th>请求号</th><th>提交状态</th><th></th></tr></thead><tbody><tr v-for="request in requests" :key="request.id"><td>{{ new Date(request.createdAt).toLocaleString() }}</td><td class="mono">{{ request.id }}</td><td>{{ request.status === 'ACCEPTED' ? '已受理' : '待确认' }}</td><td><button :disabled="busy" @click="restore(request)">查看 / 恢复请求</button></td></tr></tbody></table></section>
+    <section v-if="requests.length" class="surface api-test-history"><h2>测试请求</h2><table><thead><tr><th>时间</th><th>请求号</th><th>提交状态</th><th></th></tr></thead><tbody><tr v-for="request in requests" :key="request.id"><td>{{ new Date(request.createdAt).toLocaleString() }}</td><td class="mono">{{ request.id }}</td><td>{{ requestStatusLabel(request.status) }}</td><td><button :disabled="busy" @click="restore(request)">查看 / 恢复请求</button></td></tr></tbody></table></section>
   </div>
 </template>

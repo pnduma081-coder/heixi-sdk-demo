@@ -30,7 +30,7 @@ export class EventSyncState {
     return this.store.db
       .prepare(`SELECT id,name,external_user_id AS externalUserId,credits FROM users u WHERE
         EXISTS(SELECT 1 FROM event_sync_users s WHERE s.user_id=u.id) OR
-        EXISTS(SELECT 1 FROM requests r WHERE r.user_id=u.id) OR
+        EXISTS(SELECT 1 FROM requests r WHERE r.user_id=u.id AND r.status NOT IN ('NOT_SENT','REJECTED')) OR
         EXISTS(SELECT 1 FROM api_event_cursors c WHERE c.user_id=u.id) OR
         EXISTS(SELECT 1 FROM events e WHERE e.user_id=u.id) OR
         EXISTS(SELECT 1 FROM sale_quotes q WHERE q.user_id=u.id)
@@ -43,7 +43,7 @@ export class EventSyncState {
       this.store.db
         .prepare(`SELECT 1 FROM requests r WHERE r.user_id=?
           AND r.operation IN ('design','video','apparel','sdkApproval') AND r.created_at>=?
-          AND (r.status IN ('ACCEPTED','APPROVED') OR r.created_at>=?)
+          AND (r.status IN ('ACCEPTED','APPROVED') OR (r.status IN ('PENDING','UNCONFIRMED') AND r.created_at>=?))
           AND NOT EXISTS(SELECT 1 FROM event_sync_completed c WHERE c.user_id=r.user_id AND c.request_id=r.id)
           AND NOT EXISTS(SELECT 1 FROM results s WHERE s.user_id=r.user_id AND json_extract(s.payload,'$.clientRequestId')=r.id)
           LIMIT 1`)
