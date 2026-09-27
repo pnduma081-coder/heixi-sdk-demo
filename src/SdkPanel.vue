@@ -85,34 +85,29 @@ const workspace = new SdkWorkspace(
       timedOut = true;
       startup.abort();
     }, 45000);
-    const credits = Math.max(0, props.user.credits),
-      displayName = props.user.name;
+    const displayName = props.user.name;
     try {
-      // 【SDK 对接点 1】打开创作页面：页面、余额和用户资料由宿主提供，之后用 update() 同步。
+      // 【SDK 对接点 1】本示例不提供用户钱包；credits 为协议必填显示值，0 有效。
       const instance = await openSdk({
         container: container.value,
         ...target,
-        credits,
+        credits: 0,
         context: { demoUserId: actorId, example: "sdk-demo" },
         profile: { displayName },
-        // 本示例显式打开顶部栏，方便验收充值、余额和用户资料交互。
-        showHeader: true,
+        // 不把演示余额展示成真实商户余额，也不提供虚假的充值入口。
+        showHeader: false,
         signal: AbortSignal.any([signal, startup.signal]),
       });
       // openSdk 已等待 ready；不再因重复 host-state 请求延迟显示整个页面。
-      // 初始化期间余额可能变化，后台补齐最新状态，不阻塞首次显示。
-      if (
-        credits !== Math.max(0, props.user.credits) ||
-        displayName !== props.user.name
-      )
+      // 初始化期间用户资料可能变化，补齐资料，不阻塞首屏。
+      if (displayName !== props.user.name)
         void instance
           .update({
-            credits: Math.max(0, props.user.credits),
             profile: { displayName: props.user.name },
           })
           .catch(() => {
             if (!signal.aborted)
-              failure.value = "算力信息暂未更新，请稍后重试。";
+              failure.value = "用户资料暂未更新，请稍后重试。";
           });
       return instance;
     } catch (error) {
@@ -145,16 +140,18 @@ onMounted(async () => {
 watch([() => props.page, () => props.resourceId], () => {
   if (mounted) void show();
 });
-watch([() => props.user.credits, () => props.user.name], () => {
-  void workspace
-    .update({
-      credits: Math.max(0, props.user.credits),
-      profile: { displayName: props.user.name },
-    })
-    .catch(() => {
-      if (mounted) failure.value = "算力信息暂未更新，请稍后重试。";
-    });
-});
+watch(
+  () => props.user.name,
+  () => {
+    void workspace
+      .update({
+        profile: { displayName: props.user.name },
+      })
+      .catch(() => {
+        if (mounted) failure.value = "用户资料暂未更新，请稍后重试。";
+      });
+  },
+);
 onBeforeUnmount(() => {
   mounted = false;
   navigationFeedback.dispose();

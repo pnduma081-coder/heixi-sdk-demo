@@ -151,12 +151,8 @@ export function createHandler(
           eventFailures: results.inbox.diagnostics(user.id),
           platformCosts: store.platformCosts(user.id),
           pendingSales: store.sales.pending(user.id),
-          reservedCredits: store.sales.held(user.id),
-          availableCredits: Math.max(
-            0,
-            user.credits - store.sales.held(user.id),
-          ),
-          reservations: store.sales.reservations(user.id),
+          saleRecords: store.sales.records(user.id),
+          legacyReservations: store.sales.reservations(user.id),
         });
         return true;
       }

@@ -426,23 +426,15 @@ test("historical API quote recovery is preserved and SDK still requires host app
   );
   try {
     const direct = new Operations(api, store);
-    await assert.rejects(
-      () =>
-        direct.approve(user, {
-          quoteId: sdkQuote.quoteId,
-          clientRequestId: sdkId,
-        }),
-      /算力不足/,
-    );
-    assert.equal(
-      calls.some((path) => path.endsWith("/approve")),
-      false,
-    );
-    store.addCredit(user.id, 100, randomUUID());
     await direct.approve(user, {
       quoteId: sdkQuote.quoteId,
       clientRequestId: sdkId,
     });
+    assert.equal(store.user(user.id).credits, 0);
+    assert.equal(store.sales.held(user.id), 0);
+    assert(calls.some((path) => path.endsWith("/approve")));
+    // Topup is only for restoring the pre-existing API quote below.
+    store.addCredit(user.id, 100, randomUUID());
     assert.equal(store.sales.quote(user.id, sdkId)?.estimatedCredits, 35);
     store.db
       .prepare("INSERT INTO api_request_modes VALUES(?,?,?)")

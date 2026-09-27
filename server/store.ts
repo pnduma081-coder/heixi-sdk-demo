@@ -176,7 +176,7 @@ export class Store {
     const balance = this.user(userId).credits + delta;
     if (!Number.isSafeInteger(delta) || !Number.isSafeInteger(balance))
       throw new AppError(409, "算力超出安全整数范围");
-    // 保留已发生的用户售价或历史许可扣款；负余额会阻止后续批准。
+    // 仅供历史余额策略恢复，不能用它扣除新请求的平台成本。
     this.db
       .prepare("UPDATE users SET credits=? WHERE id=?")
       .run(balance, userId);
@@ -221,7 +221,7 @@ export class Store {
       throw new AppError(400, "算力事件金额无效");
     this.transaction(() => {
       if (this.processed(event.eventId, user.id, hash)) return;
-      // AI 成本回调只记平台成本；模板许可沿用原行为，不属于生成售价结算。
+      // 平台成本与模板许可均保留为平台事件，不经营本地用户钱包。
       this.db
         .prepare("INSERT INTO platform_credit_events VALUES(?,?,?,?,?,?)")
         .run(
@@ -232,8 +232,7 @@ export class Store {
           JSON.stringify(event.data),
           new Date().toISOString(),
         );
-      if (event.eventType === "credits.license_debited")
-        this.changeBalance(user.id, delta, event.eventType, event.eventId);
+
       this.db
         .prepare("INSERT INTO events VALUES(?,?,?,?)")
         .run(event.eventId, user.id, hash, new Date().toISOString());

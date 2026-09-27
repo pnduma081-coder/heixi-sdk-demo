@@ -54,9 +54,17 @@ export type SessionState = {
     createdAt: string;
   }>;
   pendingSales?: JsonObject[];
-  reservedCredits?: number;
-  availableCredits?: number;
-  reservations?: Array<{
+  saleRecords?: Array<{
+    settlementId: string;
+    quoteId: string;
+    requestId: string;
+    kind: string;
+    amount: number;
+    status: string;
+    createdAt: string;
+    policy: string | null;
+  }>;
+  legacyReservations?: Array<{
     quoteId: string;
     requestId: string;
     amount: number;

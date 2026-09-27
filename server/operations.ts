@@ -13,10 +13,11 @@ export class Operations {
     this.api = api;
     this.store = store;
   }
-  // 【SDK 对接点 3】批准 SDK 报价：重读平台报价、校验归属与余额、冻结售价后再批准。
+  // 【SDK 对接点 3】读取权威报价、核对归属并批准。新请求不经营本地用户钱包。
   async approve(user: User, input: JsonObject) {
     const quoteId = uuid(input.quoteId),
       clientRequestId = string(input.clientRequestId, 64);
+    const policy = this.store.sales.approvalPolicy(user.id, clientRequestId);
     return this.saved(
       user,
       clientRequestId,
@@ -32,7 +33,7 @@ export class Operations {
           clientRequestId,
           quoteId,
         );
-        return this.store.sales.withReservation(user, quote, () =>
+        const approve = () =>
           this.api.request(
             `/open/sdk/generation-quotes/${quoteId}/approve`,
             user.externalUserId,
@@ -42,8 +43,12 @@ export class Operations {
                 estimatedCredits: quote.estimatedCredits,
               },
             },
-          ),
-        );
+          );
+        if (policy === "AUDIT_ONLY") {
+          this.store.sales.freezeAudit(user, quote);
+          return approve();
+        }
+        return this.store.sales.withReservation(user, quote, approve);
       },
     );
   }

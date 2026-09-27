@@ -3,6 +3,8 @@ import type { JsonObject, MerchantEvent, User } from "../shared/types.ts";
 import { AppError, BusinessError, object, string, uuid } from "./errors.ts";
 import { digest, type Store } from "./store.ts";
 
+export type SalePolicy = "AUDIT_ONLY" | "LEGACY_BALANCE";
+
 export type SaleQuote = {
   quoteId: string;
   externalUserId: string;
@@ -101,6 +103,8 @@ export class SaleLedger {
       CREATE TABLE IF NOT EXISTS sale_request_intents(user_id TEXT NOT NULL REFERENCES users(id),request_id TEXT NOT NULL,PRIMARY KEY(user_id,request_id));
       CREATE TABLE IF NOT EXISTS sale_quotes(quote_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), client_request_id TEXT NOT NULL, snapshot TEXT NOT NULL, price_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(user_id,client_request_id));
       CREATE TABLE IF NOT EXISTS sale_items(item_id TEXT PRIMARY KEY, quote_id TEXT NOT NULL REFERENCES sale_quotes(quote_id), credits INTEGER NOT NULL CHECK(credits>=0));
+      CREATE TABLE IF NOT EXISTS sdk_approval_policies(user_id TEXT NOT NULL REFERENCES users(id), request_id TEXT NOT NULL, policy TEXT NOT NULL CHECK(policy IN ('AUDIT_ONLY','LEGACY_BALANCE')), PRIMARY KEY(user_id,request_id));
+      CREATE TABLE IF NOT EXISTS sale_quote_policies(quote_id TEXT PRIMARY KEY REFERENCES sale_quotes(quote_id), policy TEXT NOT NULL CHECK(policy IN ('AUDIT_ONLY','LEGACY_BALANCE')));
       CREATE TABLE IF NOT EXISTS sale_reservations(quote_id TEXT PRIMARY KEY REFERENCES sale_quotes(quote_id), state TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sale_reservation_attempts(attempt_id TEXT PRIMARY KEY, quote_id TEXT NOT NULL REFERENCES sale_quotes(quote_id), status TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS sale_attempts_quote ON sale_reservation_attempts(quote_id,status);
@@ -108,14 +112,47 @@ export class SaleLedger {
       CREATE TABLE IF NOT EXISTS sale_settlements(settlement_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), quote_id TEXT NOT NULL, client_request_id TEXT NOT NULL, item_id TEXT NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>=0), original_debit_id TEXT, task_no TEXT NOT NULL, fact_digest TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS sale_settlements_item ON sale_settlements(item_id,quote_id,kind,status);
     `);
+    // Additive upgrade: old requests/quotes keep their original accounting policy.
+    store.transaction(() => {
+      store.db.exec(`INSERT OR IGNORE INTO sdk_approval_policies SELECT user_id,id,'LEGACY_BALANCE' FROM requests WHERE operation='sdkApproval';
+        INSERT OR IGNORE INTO sale_quote_policies SELECT quote_id,'LEGACY_BALANCE' FROM sale_quotes;`);
+    });
     // Upgrade outstanding old approvals conservatively; settled items contribute zero.
     store.db.exec(`INSERT OR IGNORE INTO sale_reservations
       SELECT q.quote_id,'HELD',q.created_at FROM sale_quotes q JOIN requests r
       ON r.user_id=q.user_id AND r.id=q.client_request_id
-      WHERE r.status IN ('APPROVED','ACCEPTED','UNCONFIRMED','PENDING')`);
+      WHERE r.status IN ('APPROVED','ACCEPTED','UNCONFIRMED','PENDING') AND EXISTS(SELECT 1 FROM sale_quote_policies p WHERE p.quote_id=q.quote_id AND p.policy='LEGACY_BALANCE')`);
     store.db.exec(`INSERT OR IGNORE INTO sale_reservation_attempts
       SELECT 'legacy:'||h.quote_id,h.quote_id,'UNKNOWN' FROM sale_reservations h
       WHERE h.state='HELD' AND NOT EXISTS(SELECT 1 FROM sale_reservation_attempts a WHERE a.quote_id=h.quote_id)`);
+  }
+  approvalPolicy(userId: string, requestId: string): SalePolicy {
+    return this.store.transaction(() => {
+      const old = this.store.db
+        .prepare(
+          "SELECT policy FROM sdk_approval_policies WHERE user_id=? AND request_id=?",
+        )
+        .get(userId, requestId);
+      if (old) return old.policy as SalePolicy;
+      const prior = this.store.db
+        .prepare("SELECT 1 FROM requests WHERE user_id=? AND id=?")
+        .get(userId, requestId);
+      const policy: SalePolicy = prior ? "LEGACY_BALANCE" : "AUDIT_ONLY";
+      this.store.db
+        .prepare("INSERT INTO sdk_approval_policies VALUES(?,?,?)")
+        .run(userId, requestId, policy);
+      return policy;
+    });
+  }
+  freezeAudit(user: User, input: SaleQuote) {
+    return this.freeze(user, input, undefined, "AUDIT_ONLY");
+  }
+  records(userId: string) {
+    return this.store.db
+      .prepare(`SELECT s.settlement_id AS settlementId,s.quote_id AS quoteId,s.client_request_id AS requestId,s.kind,s.amount,s.status,s.created_at AS createdAt,p.policy
+      FROM sale_settlements s LEFT JOIN sale_quote_policies p ON p.quote_id=s.quote_id
+      WHERE s.user_id=? ORDER BY s.rowid DESC LIMIT 100`)
+      .all(userId);
   }
   held(userId: string) {
     return Number(
@@ -224,7 +261,12 @@ export class SaleLedger {
       .get(userId, requestId);
     return row ? JSON.parse(String(row.snapshot)) : undefined;
   }
-  freeze(user: User, input: SaleQuote, reserve?: () => void) {
+  freeze(
+    user: User,
+    input: SaleQuote,
+    reserve?: () => void,
+    policy: SalePolicy = "LEGACY_BALANCE",
+  ) {
     const quote = saleQuote(input, user, input.clientRequestId);
     return this.store.transaction(() => {
       const priceDigest = digest({
@@ -261,6 +303,17 @@ export class SaleLedger {
         for (const item of quote.saleItems)
           insert.run(item.itemId, quote.quoteId, item.credits);
       }
+      const priorPolicy = this.store.db
+        .prepare("SELECT policy FROM sale_quote_policies WHERE quote_id=?")
+        .get(quote.quoteId);
+      if (priorPolicy && priorPolicy.policy !== policy)
+        throw new BusinessError(
+          "QUOTE_MISMATCH",
+          "原报价的记账方式不能改变，请恢复原请求",
+        );
+      this.store.db
+        .prepare("INSERT OR IGNORE INTO sale_quote_policies VALUES(?,?)")
+        .run(quote.quoteId, policy);
       this.reconcile(user.id, quote.quoteId);
       reserve?.();
       return quote;
@@ -308,7 +361,7 @@ export class SaleLedger {
   private reconcile(userId: string, quoteId: string) {
     const quote = this.store.db
       .prepare(
-        "SELECT user_id,client_request_id FROM sale_quotes WHERE quote_id=?",
+        "SELECT q.user_id,q.client_request_id,p.policy FROM sale_quotes q JOIN sale_quote_policies p ON p.quote_id=q.quote_id WHERE q.quote_id=?",
       )
       .get(quoteId);
     if (!quote) return; // 回调先到：已持久化，待本地确认报价后再核对，绝不猜价。
@@ -334,7 +387,7 @@ export class SaleLedger {
       if (row.kind === "SALE_REFUND") {
         const debit = this.store.db
           .prepare(
-            "SELECT * FROM sale_settlements WHERE settlement_id=? AND status='APPLIED'",
+            "SELECT * FROM sale_settlements WHERE settlement_id=? AND status IN ('APPLIED','RECORDED')",
           )
           .get(String(row.original_debit_id));
         if (!debit) continue;
@@ -348,17 +401,19 @@ export class SaleLedger {
           throw new AppError(409, "退款不匹配原用户售价扣费");
         // 分镜预付允许 taskNo 转移；退款以不可变 itemId / originalDebitId 为准。
       }
-      this.store.changeBalance(
-        userId,
-        row.kind === "SALE_DEBIT" ? -Number(row.amount) : Number(row.amount),
-        String(row.kind),
-        String(row.settlement_id),
-      );
+      if (quote.policy === "LEGACY_BALANCE")
+        this.store.changeBalance(
+          userId,
+          row.kind === "SALE_DEBIT" ? -Number(row.amount) : Number(row.amount),
+          String(row.kind),
+          String(row.settlement_id),
+        );
       this.store.db
-        .prepare(
-          "UPDATE sale_settlements SET status='APPLIED' WHERE settlement_id=?",
-        )
-        .run(String(row.settlement_id));
+        .prepare("UPDATE sale_settlements SET status=? WHERE settlement_id=?")
+        .run(
+          quote.policy === "LEGACY_BALANCE" ? "APPLIED" : "RECORDED",
+          String(row.settlement_id),
+        );
     }
   }
   pending(userId: string) {

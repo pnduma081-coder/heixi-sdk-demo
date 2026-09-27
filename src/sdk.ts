@@ -107,7 +107,7 @@ export function createSdkOptions(
       );
       return signature;
     },
-    // 【SDK 对接点 3】生成前批准：后端核对平台报价并检查商户自有余额。
+    // 【SDK 对接点 3】生成前批准：后端核对报价与身份；新请求不以本地余额作为批准门槛。
     onBeforeGenerate: async (request, signal) => {
       const decision = await approveGeneration(actorId, request, signal);
       if (!signal.aborted) handlers.onRefresh();

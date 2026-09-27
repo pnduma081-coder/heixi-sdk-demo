@@ -14,7 +14,7 @@ import { Store } from "../server/store.ts";
 import type { MerchantEvent } from "../shared/types.ts";
 
 function quote(store: Store, prices = [60]): SaleQuote {
-  return {
+  const value = {
     quoteId: randomUUID(),
     clientRequestId: randomUUID(),
     externalUserId: store.user("demo-a").externalUserId,
@@ -22,6 +22,11 @@ function quote(store: Store, prices = [60]): SaleQuote {
     expiresAt: new Date(Date.now() + 300000).toISOString(),
     saleItems: prices.map((credits) => ({ itemId: randomUUID(), credits })),
   };
+  // This suite preserves the previous wallet policy for historical requests.
+  store.db
+    .prepare("INSERT INTO sdk_approval_policies VALUES(?,?,'LEGACY_BALANCE')")
+    .run("demo-a", value.clientRequestId);
+  return value;
 }
 function sale(q: SaleQuote, index: number, refund = false): MerchantEvent {
   const item = q.saleItems[index];
@@ -44,7 +49,7 @@ function sale(q: SaleQuote, index: number, refund = false): MerchantEvent {
   };
 }
 
-test("concurrent SDK approvals reserve atomically across independent store connections", async () => {
+test("historical SDK approvals reserve atomically across independent store connections", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rhino-hold-"));
   const path = join(dir, "test.sqlite");
   const a = new Store(path),

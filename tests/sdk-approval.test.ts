@@ -10,7 +10,7 @@ import { ResultService } from "../server/results.ts";
 import { Store } from "../server/store.ts";
 import { approveGeneration } from "../src/sdk-approval.ts";
 
-test("SDK approval callback maps only explicit business refusals, uses authoritative balance and keeps approval semantics", async (t) => {
+test("historical SDK callback preserves balance refusals and approval semantics", async (t) => {
   const store = new Store(":memory:");
   let mode = "quote",
     approvals = 0;
@@ -110,6 +110,10 @@ test("SDK approval callback maps only explicit business refusals, uses authorita
       return response;
     },
   );
+  store.startRequest("demo-a", request.clientRequestId, "sdkApproval", {
+    quoteId: request.quoteId,
+    clientRequestId: request.clientRequestId,
+  });
   const generate = () =>
     approveGeneration("demo-a", request, new AbortController().signal);
   try {

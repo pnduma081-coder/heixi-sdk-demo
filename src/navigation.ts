@@ -34,7 +34,7 @@ export const menu = [
 export const accountPages = [
   { path: "/works", title: "我的作品", icon: "folder", section: "works" },
   { path: "/users", title: "用户管理", icon: "users", section: "users" },
-  { path: "/credits", title: "算力记录", icon: "wallet", section: "credits" },
+  { path: "/credits", title: "消耗记录", icon: "wallet", section: "credits" },
   {
     path: "/integration",
     title: "接入设置",

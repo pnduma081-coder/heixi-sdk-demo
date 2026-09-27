@@ -42,6 +42,30 @@ try {
     throw new AppError(502, "fixture unknown");
   });
 } catch {}
+const auditQuote = {
+  ...q,
+  quoteId: randomUUID(),
+  clientRequestId: "sdk-audit-example",
+  estimatedCredits: 60,
+  saleItems: [{ itemId: randomUUID(), credits: 60 }],
+};
+store.sales.approvalPolicy(user.id, auditQuote.clientRequestId);
+store.sales.freezeAudit(user, auditQuote);
+store.sales.receive({
+  eventId: randomUUID(),
+  eventVersion: "merchant-events/v1",
+  eventType: "credits.sale_debited",
+  externalUserId: user.externalUserId,
+  occurredAt: new Date().toISOString(),
+  data: {
+    quoteId: auditQuote.quoteId,
+    clientRequestId: auditQuote.clientRequestId,
+    itemId: auditQuote.saleItems[0].itemId,
+    amount: 60,
+    taskNo: "AI-ui-fixture",
+    settlementId: `sale:${auditQuote.saleItems[0].itemId}:debit`,
+  },
+});
 const requestId = "local-ui-request",
   submissionNo = "GS-local-ui";
 store.startRequest(user.id, requestId, "design", {

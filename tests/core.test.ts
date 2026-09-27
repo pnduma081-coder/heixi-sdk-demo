@@ -53,7 +53,7 @@ test("isolated SQLite persists users, topups and separate deduplicated platform 
     rmSync(directory, { recursive: true, force: true });
   }
 });
-test("credit event rollback and negative balance preserve actual ledger facts", () => {
+test("credit event rollback and historical negative balances preserve ledger facts", () => {
   const store = new Store(":memory:");
   try {
     store.db.exec(
@@ -64,6 +64,11 @@ test("credit event rollback and negative balance preserve actual ledger facts", 
     assert.equal(store.user("demo-a").credits, 0);
     store.db.exec("DROP TRIGGER fail_events");
     store.creditEvent({ ...event(), eventType: "credits.license_debited" });
+    assert.equal(store.user("demo-a").credits, 0);
+    // Old actual ledger entries must still be representable; new costs never create them.
+    store.transaction(() =>
+      store.changeBalance("demo-a", -20, "SALE_DEBIT", "legacy-fact"),
+    );
     assert.equal(store.user("demo-a").credits, -20);
   } finally {
     store.close();

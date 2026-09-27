@@ -222,7 +222,7 @@ test("refund waits for original debit; transaction failure cannot leave a partia
   }
 });
 
-test("legacy cost debit stays unchanged, new generation costs are audit-only and template licenses retain original behavior", () => {
+test("legacy cost debit stays unchanged, new costs and template licenses are audit-only", () => {
   const store = new Store(":memory:");
   try {
     const q = quote(store),
@@ -239,7 +239,7 @@ test("legacy cost debit stays unchanged, new generation costs are audit-only and
     store.creditEvent(cost(q));
     assert.equal(store.user("demo-b").credits, 980);
     store.creditEvent({ ...cost(q), eventType: "credits.license_debited" });
-    assert.equal(store.user("demo-b").credits, 960);
+    assert.equal(store.user("demo-b").credits, 980);
     assert.throws(
       () =>
         saleQuote(

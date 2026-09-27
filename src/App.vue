@@ -19,16 +19,13 @@ const config = ref<DemoConfig>(),
   error = ref("");
 const busy = ref(false),
   switching = ref(false),
-  topupOpen = ref(false),
-  amount = ref(1000),
   mobileMenu = ref(false);
 const page = usePage(),
   route = useRoute();
 const subtools = computed(() =>
   tools.filter((tool) => tool.group === page.value.group),
 );
-let generation = 0,
-  topupId = crypto.randomUUID();
+let generation = 0;
 const lifetime = new AbortController();
 const sessionRefresh = new SessionRefresh(async () => {
   const version = generation;
@@ -67,14 +64,12 @@ async function switchUser(id: string) {
   if (id === session.value?.user.id) return;
   await run(async () => {
     switching.value = true;
-    topupOpen.value = false;
     generation++;
     try {
       await api("/api/session", {
         body: { userId: id },
         signal: lifetime.signal,
       });
-      topupId = crypto.randomUUID();
       await refresh();
     } finally {
       switching.value = false;
@@ -94,28 +89,12 @@ async function createUser(name: string) {
     await refresh();
   });
 }
-function openTopup() {
-  topupId = crypto.randomUUID();
-  topupOpen.value = true;
-}
-function newTopupRequest() {
-  topupId = crypto.randomUUID();
-}
-async function topup() {
-  await run(async () => {
-    await api("/api/credits", {
-      body: { amount: amount.value, requestId: topupId },
-      userId: session.value?.user.id,
-      signal: lifetime.signal,
-    });
-    topupId = crypto.randomUUID();
-    topupOpen.value = false;
-    await refresh();
-  });
+function showBillingInfo() {
+  error.value =
+    "本示例不提供用户充值。生成会消耗平台商户算力；商户账户充值请在黑犀后台操作。";
 }
 function handleEscape(event: KeyboardEvent) {
   if (event.key === "Escape") {
-    topupOpen.value = false;
     mobileMenu.value = false;
   }
 }
@@ -159,19 +138,19 @@ onBeforeUnmount(() => {
       <div class="sidebar-foot"><span class="status-dot"></span>本地创作平台</div>
     </aside>
     <div class="platform-body">
-      <header class="platform-topbar"><div class="page-breadcrumb"><button class="icon-button mobile-menu-toggle" aria-label="展开导航" @click="mobileMenu = !mobileMenu"><Icon name="menu" /></button><span>{{ page.sdkPage || page.section === 'api-test' ? '创作工作台' : '我的空间' }}</span><Icon name="chevron" /><strong>{{ page.title }}</strong></div><div v-if="session" class="account-actions"><button class="icon-button" aria-label="刷新账户数据" title="刷新账户数据" :disabled="busy || switching" @click="run(refresh)"><Icon name="refresh" /></button><button class="credit-balance" @click="openTopup"><Icon name="wallet" /><strong>{{ (session.availableCredits ?? session.user.credits).toLocaleString() }}</strong><span>算力</span><span class="recharge-label">充值</span></button><span class="topbar-divider"></span><span class="avatar">{{ session.user.name.slice(-1) }}</span><select :value="session.user.id" :disabled="busy" aria-label="当前用户" @change="chooseUser"><option v-for="user in session.users" :key="user.id" :value="user.id">{{ user.name }}</option></select></div></header>
+      <header class="platform-topbar"><div class="page-breadcrumb"><button class="icon-button mobile-menu-toggle" aria-label="展开导航" @click="mobileMenu = !mobileMenu"><Icon name="menu" /></button><span>{{ page.sdkPage || page.section === 'api-test' ? '创作工作台' : '我的空间' }}</span><Icon name="chevron" /><strong>{{ page.title }}</strong></div><div v-if="session" class="account-actions"><button class="icon-button" aria-label="刷新账户数据" title="刷新账户数据" :disabled="busy || switching" @click="run(refresh)"><Icon name="refresh" /></button><RouterLink class="button" to="/credits">消耗记录</RouterLink><span class="topbar-divider"></span><span class="avatar">{{ session.user.name.slice(-1) }}</span><select :value="session.user.id" :disabled="busy" aria-label="当前用户" @change="chooseUser"><option v-for="user in session.users" :key="user.id" :value="user.id">{{ user.name }}</option></select></div></header>
       <div v-if="error" class="app-alert" role="alert"><Icon name="warning" /><span>{{ error }}</span><button class="icon-button" aria-label="关闭提示" @click="error = ''"><Icon name="close" /></button></div>
       <main class="platform-main" :class="{ 'platform-main--creation': page.sdkPage }">
         <div v-if="page.sdkPage && subtools.length > 1" class="tool-tabs" :aria-label="`${page.title}功能导航`"><RouterLink v-for="tool in subtools" :key="tool.page" :to="tool.path" :class="{ active: page.sdkPage === tool.page }">{{ tool.title }}</RouterLink></div>
         <template v-if="!session || !config || switching"><div v-if="error" class="workspace-state" role="alert"><p>暂时无法进入工作台，请重试。</p><button @click="run(initialize)">重试</button></div><PagePlaceholder v-else :label="switching ? '正在切换账户…' : '正在进入工作台…'" /></template>
         <RouterView v-else v-slot="{ Component }">
-          <component v-if="page.sdkPage" :is="Component" :key="`sdk-${session.user.id}`" :user="{ ...session.user, credits: session.availableCredits ?? session.user.credits }" :config="config" :page="page.sdkPage" :title="page.title" :resource-id="page.resourceId" @refresh="requestRefresh" @recharge="openTopup" />
+          <component v-if="page.sdkPage" :is="Component" :key="`sdk-${session.user.id}`" :user="session.user" :config="config" :page="page.sdkPage" :title="page.title" :resource-id="page.resourceId" @refresh="requestRefresh" @recharge="showBillingInfo" />
           <component v-else-if="page.section === 'api-test'" :is="Component" :key="`api-test-${session.user.id}`" :session="session" :ready="config.apiReady" @refresh="requestRefresh" />
           <div v-else-if="page.section === 'api'" class="management-page"><div class="page-heading"><div><h1>API 调试</h1><p>用于开发联调的接口示例与请求记录。</p></div></div><component :is="Component" :key="session.user.id" :user="session.user" :ready="config.apiReady" :requests="session.requests" @refresh="requestRefresh" /></div>
-          <component v-else :is="Component" :key="`${page.section}-${session.user.id}`" :section="page.section" :session="session" :config="config" :busy="busy" @switch-user="switchUser" @add-user="createUser" @recharge="openTopup" @refresh="requestRefresh" />
+          <component v-else :is="Component" :key="`${page.section}-${session.user.id}`" :section="page.section" :session="session" :config="config" :busy="busy" @switch-user="switchUser" @add-user="createUser" @recharge="showBillingInfo" @refresh="requestRefresh" />
         </RouterView>
       </main>
     </div>
-    <Teleport to="body"><div v-if="topupOpen && session" class="modal-backdrop" @click.self="topupOpen = false"><form class="modal" role="dialog" aria-modal="true" aria-labelledby="topup-title" @submit.prevent="topup"><div class="modal-heading"><h2 id="topup-title">增加测试算力</h2><button type="button" class="icon-button" aria-label="关闭充值" @click="topupOpen = false"><Icon name="close" /></button></div><p>{{ session.user.name }} · 当前可用 {{ (session.availableCredits ?? session.user.credits).toLocaleString() }} 算力</p><label class="field-label" for="topup-amount">充值数量</label><input id="topup-amount" v-model.number="amount" type="number" min="1" step="1" required @change="newTopupRequest" /><p class="hint">增加本地账户余额，用于测试生成前的算力校验。</p><p v-if="error" class="error" role="alert">{{ error }}</p><button class="primary full-width" :disabled="busy">{{ busy ? '正在处理…' : '确认充值' }}</button></form></div></Teleport>
+
   </div>
 </template>
