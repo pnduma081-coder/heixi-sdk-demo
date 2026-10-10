@@ -10,6 +10,7 @@
   "scripts": {
     "setup:local": "node scripts/setup.mjs",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.ts",
+    "dev:tunnel": "node scripts/dev-tunnel.mjs",
     "dev:https": "node --disable-warning=ExperimentalWarning --watch server/index.ts --https",
     "typecheck": "vue-tsc --noEmit",
     "check": "biome check .",

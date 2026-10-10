@@ -64,7 +64,15 @@ SDK 的最小接入为加载页面、取得签名、批准生成及处理算力�
 
 本地开发可以使用 Cloudflare Tunnel，将公网 HTTPS 回调转发到本机 HTTP。回调域名仅公开两条回调；示例页面可另配一个独立 HTTPS 入口，本机仍使用 HTTP 回源。首次使用先复制 `cloudflare/tunnel.example.json` 为 `cloudflare/tunnel.json`（已被 Git 忽略）并填写自己的隧道信息。
 
-复用已配置的隧道（已有进程无需重复启动）：
+已配置好隧道和 Token 后，可用一个命令同时启动 HTTP 服务与隧道：
+
+```bash
+pnpm dev:tunnel
+```
+
+按 `Ctrl+C` 一并停止；任一子进程退出时会停止另一进程。该命令要求隧道使用 `http://127.0.0.1:3443` 回源，公网页面仍为 HTTPS。运行前先停止已有的开发服务和隧道，避免重复启动。
+
+也可以分别启动（已有进程无需重复启动）：
 
 ```bash
 pnpm dev           # 终端一：本项目 HTTP 服务

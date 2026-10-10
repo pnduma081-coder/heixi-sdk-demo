@@ -51,6 +51,7 @@ https://<your-callback-origin>/webhooks/generation
 | `pnpm tunnel:token` | 在隐藏输入中粘贴控制台的连接命令或 Token。脚本核对账号与隧道 ID 后保存到 `.local/cloudflare/token`（权限 0600） |
 | `node scripts/cloudflare.mjs token-ui` | 同上，改用临时本机网页粘贴。页面只监听回环地址，保存成功或 10 分钟后自动关闭 |
 | `pnpm tunnel` | 使用已保存的 Token 前台运行连接，Ctrl+C 停止；不安装系统服务 |
+| `pnpm dev:tunnel` | 同时启动 HTTP 开发服务与已配置的隧道，Ctrl+C 一并停止；需先停止已有服务和隧道 |
 | `pnpm tunnel:config` | 输出期望的远程路由配置，用于核对 |
 | `pnpm tunnel:check` | 向回调入口发送无签名请求：两条 webhook 应返回 401，`/` 和 `/api/session` 应返回 404。不会触发生成，也不会改动账本 |
 

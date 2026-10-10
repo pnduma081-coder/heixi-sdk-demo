@@ -23,7 +23,7 @@ Quick Tunnel 无需 Cloudflare 账号。[官方入门](https://developers.cloudf
 
 页面入口需要固定域名，Quick Tunnel 只适合调试回调。
 
-已经配置好固定隧道（`cloudflare/tunnel.json` 已填写，`.local/cloudflare/token` 已保存）时，每天只需开两个终端分别运行 `pnpm dev`、`pnpm tunnel`，再运行 `pnpm tunnel:check`。进程已在运行时不要重复启动。
+已经配置好固定隧道（`cloudflare/tunnel.json` 已填写，`.local/cloudflare/token` 已保存，回源为 `http://127.0.0.1:3443`）时，每天只需运行 `pnpm dev:tunnel`，同时启动服务和隧道，按 `Ctrl+C` 一并停止。也可以开两个终端分别运行 `pnpm dev`、`pnpm tunnel`。另开终端运行 `pnpm tunnel:check` 验证回调。进程已在运行时不要重复启动。
 
 ## 2. 公共准备
 
