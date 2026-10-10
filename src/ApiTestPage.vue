@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   JsonObject,
   RequestRecord,
@@ -9,6 +9,9 @@ import type {
 import { api, message } from "./api.ts";
 import {
   asObject,
+  mainImageChoices,
+  mainImageCredits,
+  mainImageParameters,
   mainImageRequest,
   submissionNumber,
   testRequests,
@@ -16,6 +19,7 @@ import {
 } from "./api-test.ts";
 import EventFailures from "./EventFailures.vue";
 import { GenerationPoller } from "./generation-poller.ts";
+import { imageCapability, imageOptions } from "./model-options.ts";
 import { requestStatusLabel } from "./request-status.ts";
 import { ResultWatcher } from "./result-watcher.ts";
 
@@ -26,8 +30,11 @@ const props = defineProps<{
 const emit = defineEmits<{ refresh: [] }>();
 const actorId = props.session.user.id;
 const lifetime = new AbortController();
-const model = ref<JsonObject>(),
-  modelName = computed(() => String(model.value?.modelName || ""));
+const models = ref<JsonObject[]>([]),
+  selectedModelId = ref("");
+const model = computed(() =>
+  models.value.find((item) => item.id === selectedModelId.value),
+);
 const asset = ref<{ assetId: string; name: string }>();
 const preview = ref(""),
   prompt = ref(""),
@@ -38,6 +45,53 @@ const busy = ref(false),
 const originalRequest = ref<JsonObject>(),
   activeId = ref(""),
   submissionNo = ref("");
+const selection = ref<JsonObject>({});
+const choices = computed(() =>
+  mainImageChoices(model.value || {}, selection.value.resolution),
+);
+const parametersError = ref("");
+const parametersLocked = computed(
+  () =>
+    !props.ready ||
+    busy.value ||
+    loadingModel.value ||
+    !model.value ||
+    Boolean(originalRequest.value),
+);
+function normalizeSelection() {
+  if (originalRequest.value || !model.value) return;
+  parametersError.value = "";
+  try {
+    const count = Number(selection.value.outputCount) || 1;
+    selection.value = {
+      ...imageOptions(imageCapability(model.value), selection.value),
+      outputCount: Math.min(
+        Math.max(Math.floor(count), 1),
+        choices.value.counts.length,
+      ),
+    };
+  } catch (cause) {
+    selection.value = {};
+    parametersError.value = message(cause);
+  }
+}
+watch([model, originalRequest], normalizeSelection);
+const estimate = computed(() => {
+  if (!model.value) return undefined;
+  try {
+    const params =
+      originalRequest.value ||
+      mainImageParameters(model.value, selection.value);
+    return {
+      credits: mainImageCredits(model.value, params),
+      parameters: [params.resolution, params.ratio, `${params.outputCount} 张`]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  } catch {
+    return undefined;
+  }
+});
 const finalStatus = ref<JsonObject>(),
   statusError = ref("");
 const pollPaused = ref(false);
@@ -108,7 +162,10 @@ const canSubmit = computed(
     !submitted.value &&
     Boolean(
       originalRequest.value ||
-        (model.value && asset.value && prompt.value.trim()),
+        (model.value &&
+          !parametersError.value &&
+          asset.value &&
+          prompt.value.trim()),
     ),
 );
 const call = (operation: string, params: JsonObject) =>
@@ -126,16 +183,27 @@ async function loadModel() {
       configKey: "main_image",
       feature: "MAIN_IMAGE",
     });
-    if (!Array.isArray(list) || !list.length)
+    if (lifetime.signal.aborted) return;
+    models.value = Array.isArray(list)
+      ? list
+          .map(asObject)
+          .filter((item) => typeof item.id === "string" && item.id.length > 0)
+      : [];
+    if (!models.value.length)
       throw new Error("暂无可用主图模型，请检查功能授权");
-    model.value = asObject(
-      list.find((item) => asObject(item).isDefault === true) || list[0],
-    );
+    if (!originalRequest.value) selectAvailableModel();
   } catch (cause) {
     if (!lifetime.signal.aborted) error.value = message(cause);
   } finally {
     loadingModel.value = false;
   }
+}
+function selectAvailableModel() {
+  if (model.value) return;
+  selectedModelId.value = String(
+    (models.value.find((item) => item.isDefault === true) || models.value[0])
+      ?.id || "",
+  );
 }
 async function upload(event: Event) {
   const input = event.target as HTMLInputElement,
@@ -180,6 +248,7 @@ async function submit() {
         asset.value,
         prompt.value,
         crypto.randomUUID(),
+        selection.value,
       );
     }
     activeId.value = String(originalRequest.value.clientRequestId);
@@ -233,6 +302,13 @@ function visibilityChanged() {
 function restore(item: RequestRecord) {
   stopPolling();
   originalRequest.value = item.body;
+  selectedModelId.value = String(item.body.modelId || "");
+  selection.value = {
+    ...(item.body.resolution ? { resolution: item.body.resolution } : {}),
+    ...(item.body.ratio ? { ratio: item.body.ratio } : {}),
+    outputCount: item.body.outputCount,
+  };
+  parametersError.value = "";
   activeId.value = item.id;
   prompt.value = String(asObject(item.body.spec).productDescription || "");
   const ids = item.body.sourceAssetIds;
@@ -257,6 +333,7 @@ function restore(item: RequestRecord) {
 function newTest() {
   stopPolling();
   originalRequest.value = undefined;
+  selectAvailableModel();
   activeId.value = "";
   submissionNo.value = "";
   finalStatus.value = undefined;
@@ -289,19 +366,36 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="management-page api-test-page">
-    <div class="page-heading"><div><h1>API 测试</h1><p>上传商品图片并填写需求，通过 API 生成一张爆款首图。</p></div><span class="pill">{{ session.user.name }}</span></div>
+    <div class="page-heading"><div><h1>API 测试</h1><p>上传商品图片，选择模型和生成参数，通过 API 测试主图生成。</p></div><span class="pill">{{ session.user.name }}</span></div>
     <p class="hint">由商户后端直接调用生成接口，实际消耗由黑犀商户账户结算。</p>
     <p v-if="!ready" class="error">请先在接入设置中完成 API 配置。</p>
     <div class="api-test-layout">
       <form class="surface api-test-form" @submit.prevent="submit">
         <h2>生成主图</h2>
+        <label class="field-label" for="api-test-model">生图模型</label>
+        <select id="api-test-model" v-model="selectedModelId" :disabled="!ready || busy || loadingModel || Boolean(originalRequest) || !models.length" required>
+          <option v-if="!selectedModelId" value="" disabled>{{ loadingModel ? '正在加载模型…' : '暂无可用模型' }}</option>
+          <option v-if="selectedModelId && !model" :value="selectedModelId" disabled>{{ selectedModelId }}（原请求模型，当前列表不可用）</option>
+          <option v-for="item in models" :key="String(item.id)" :value="String(item.id)">{{ item.modelName || item.id }}{{ item.isDefault === true ? '（默认）' : '' }}</option>
+        </select>
+        <p class="hint">{{ originalRequest ? '当前请求的模型和参数已固定；修改参数请点击“新建测试”。' : '分辨率、比例和张数按所选模型提供的能力联动。' }}</p>
+        <div class="api-test-options">
+          <div><label class="field-label" for="api-test-resolution">分辨率</label><select id="api-test-resolution" v-model="selection.resolution" :disabled="parametersLocked || !choices.resolutions.length" @change="normalizeSelection"><option v-if="!choices.resolutions.length && !selection.resolution" :value="undefined">模型默认</option><option v-if="originalRequest && selection.resolution && !choices.resolutions.includes(String(selection.resolution))" :value="selection.resolution">{{ selection.resolution }}（原请求）</option><option v-for="value in choices.resolutions" :key="value" :value="value">{{ value }}</option></select></div>
+          <div><label class="field-label" for="api-test-ratio">图片比例</label><select id="api-test-ratio" v-model="selection.ratio" :disabled="parametersLocked || !choices.ratios.length"><option v-if="originalRequest && selection.ratio && !choices.ratios.includes(String(selection.ratio))" :value="selection.ratio">{{ selection.ratio }}（原请求）</option><option v-for="value in choices.ratios" :key="value" :value="value">{{ value }}</option></select></div>
+          <div><label class="field-label" for="api-test-count">生成张数</label><select id="api-test-count" v-model="selection.outputCount" :disabled="parametersLocked"><option v-if="originalRequest && !choices.counts.includes(Number(selection.outputCount))" :value="selection.outputCount">{{ selection.outputCount }} 张（原请求）</option><option v-for="count in choices.counts" :key="count" :value="count">{{ count }} 张</option></select></div>
+        </div>
+        <p v-if="parametersError" class="error" role="alert">{{ parametersError }}</p>
+        <div class="api-test-estimate" role="status" aria-live="polite">
+          <strong>{{ originalRequest ? '当前目录预估' : '预计消耗' }}：{{ loadingModel ? '正在加载…' : estimate?.credits !== undefined ? `${estimate.credits} 算力` : '暂无法估算' }}</strong>
+          <p v-if="estimate" class="hint">{{ estimate.parameters }}</p>
+          <p class="hint">{{ !loadingModel && estimate?.credits === undefined ? '当前模型目录未提供可匹配的价格。' : '按当前模型目录单价 × 生成张数估算。' }}实际扣费以平台返回的商户消费为准。</p>
+        </div>
         <label class="field-label" for="api-test-image">商品图片（单张）</label>
         <input id="api-test-image" type="file" accept="image/png,image/jpeg,image/webp" :disabled="busy || Boolean(originalRequest) || !ready" @change="upload" />
         <img v-if="preview" class="api-test-source" :src="preview" alt="已上传的商品图片" />
         <p v-if="asset" class="hint" role="status">已上传：{{ asset.name }}</p>
         <label class="field-label" for="api-test-prompt">对话 / 生成需求</label>
         <textarea id="api-test-prompt" v-model="prompt" placeholder="例如：保留商品外观，生成白色背景的电商主图，光影自然，不添加文字。" maxlength="2000" :disabled="busy || Boolean(originalRequest)" required></textarea>
-        <p class="hint">{{ loadingModel ? '正在加载模型…' : modelName ? `模型：${modelName} · 生成 1 张` : '尚未加载模型' }}</p>
         <div class="actions"><button class="primary" :disabled="!canSubmit">{{ busy ? '正在处理…' : submitted ? '已提交' : originalRequest ? '使用原请求重试' : '提交生成' }}</button><button v-if="originalRequest" type="button" :disabled="busy" @click="newTest">新建测试</button><button v-else-if="!model && ready" type="button" :disabled="loadingModel" @click="loadModel">重新加载模型</button></div>
         <p v-if="error" class="error" role="alert">{{ error }}</p>
       </form>

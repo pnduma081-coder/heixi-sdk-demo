@@ -29,14 +29,10 @@ export function imageOptions(
   const ratios = strings(capability.outputRatios),
     resolutions = strings(capability.resolutionOptions);
   if (!ratios.length) throw new Error("模型没有可用的图片比例，请重新选择模型");
-  const quality = preferred(
-    strings(capability.qualityOptions),
-    preference.quality,
-  );
+  // Demo 新请求不自动传 quality，即使目录或旧参数仍包含画质字段。
   if (!resolutions.length)
     return {
       ratio: preferred(ratios, preference.ratio ?? "1:1"),
-      ...(quality ? { quality } : {}),
     };
   const firstResolution = preferred(resolutions, preference.resolution ?? "1K");
   const mapping =
@@ -54,7 +50,6 @@ export function imageOptions(
       return {
         ratio: preferred(allowed, preference.ratio ?? "1:1"),
         resolution,
-        ...(quality ? { quality } : {}),
       };
   }
   throw new Error("模型没有可用的分辨率与比例组合，请重新选择模型");

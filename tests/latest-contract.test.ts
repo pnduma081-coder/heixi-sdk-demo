@@ -33,7 +33,7 @@ test("latest model catalog produces an allowed image combination with an actual 
   assert.equal(body.contentLanguage, "zh-CN");
   assert.equal(body.resolution, "1K");
   assert.equal(body.ratio, "16:9");
-  assert.equal(body.quality, "standard");
+  assert(!("quality" in body), "new requests must not inherit catalog quality");
   const capability = imageCapability(models[0]);
   assert.deepEqual(
     imageOptions(capability, {
@@ -41,7 +41,7 @@ test("latest model catalog produces an allowed image combination with an actual 
       ratio: "1:1",
       quality: "high",
     }),
-    { resolution: "2K", ratio: "1:1", quality: "high" },
+    { resolution: "2K", ratio: "1:1" },
   );
   assert.equal(
     examples.find((value) => value.id === "design")?.params.contentLanguage,
