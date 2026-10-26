@@ -30,8 +30,16 @@ node --disable-warning=ExperimentalWarning server/f065-local-entry.ts --local-en
 - credits 已正常恢复为 version 2、enabled=false，generation=null；SDK 接收器关闭。浏览器 timeline 开关关闭、主仓临时 DNS 开关删除。既有 CORS、宿主/平台/回调/通知路由及正常服务保留。
 - 16 项 local/provider/credits 聚焦测试、SDK vue-tsc、所有本次支持文件 Biome 通过；未重跑无关全套。主仓 API 18、bootstrap 9、相关类型及 focused 通过。
 
-## 尚未通过的冷启验收
+## 冷启返工完成（2026-10-26）
 
-曾真实捕获 hello→initialize→exchange→navigate→mount→page-ready 完整链，也成功显示首屏及离开后重入；但整页冷启仍间歇 TIMEOUT。11:30 hello 接近 30 秒才到，11:32 另一轮没有 hello。Chrome Network 的 /embed Timing 显示 Initial connection=30.00s，body=0；不能据此确认 DNS、代理或传输协议根因。未延长 SDK 超时、放宽 origin、修改网络/信任或升级 SDK，不以偶发成功作为修复。稳定冷启与再次完整重入时间线仍待网络依赖排除；批准恢复/供应商/真实扣费未执行。此残余不影响已完成的配置恢复和零消费结论。
+本轮分支 `codex/f065-startup-followup`，精确基线 `0cced72fd52e480648e4b5d0708b0bf652237c1b`；主仓基线 `ecc9350009b36ed9207795b49124a0e90bcd8e01`。原冷启失败继续诊断后已定位当前可复现的验收干扰：绑定自动化调试连接的公开HTTPS iframe停在about:blank，原生Network显示Pending/Stalled、0bytes，但本地固定纯文本响应已于13:49:57.956完成200。取消当前诊断标签的自动化调试连接后，iframe立即于13:52:46.381完成load；先前已等待168653ms。相同文档的公网fetch、顶层导航、loopback与srcdoc对照均正常。
 
-证据保存在主仓 T134 任务记录及本机 `/tmp/f065-t134-credits-*.log`、`/tmp/f065-t134-final-consumption.json`。临时文件不是可发布制品。
+改用未绑定该调试连接的新原生Chrome标签后，冻结0.4完整真实旅程各执行一次：新标签冷启动iframe就绪14.191秒（整页21.405秒）、整页刷新13.887秒（整页19.662秒）、离开到我的作品再重入14.549秒；清除全部临时代码并重载SDK后，禁用缓存冷启iframe19.491秒（整页27.223秒）。四轮均捕获hello→initialize→exchange→navigate→mount→page-ready并显示完整主图表单。原生Security确认WE1可信证书/TLS1.3/所有资源安全加载；成功文档使用h3，刷新/embed HTTP200总445.88ms。
+
+这是纠正验收环境干扰，没有产品网络或SDK协议代码修复，也未定位浏览器调试工具内部具体缺陷。没有延长timeout、修改origin、关闭HTTP3、改OS代理/信任或升级SDK。四个有限样本不是稳定性/容量测试；无缓存整页27.223秒含iframe创建前准备，不能直接等同SDK的iframe30秒计时，iframe19.491秒仍保留网络波动风险。既往530和未捕获的早期TIMEOUT不统一归因。
+
+临时固定文本路由/请求时序/probe HTML及主仓early observer均已移除，源码、测试、依赖与原基线一致；本轮SDK只有此文档差异，原16项及类型/Biome证据匹配复用，diff检查通过。主仓只收口任务与CURRENT-STATE，focused文档/控制面检查通过。既有本地宿主安全阶段日志属于原实现，未新增秘密或持久权限。
+
+14:06正常配置API再次确认credits version2/enabled=false、generation=null；14:06:20.729正常商户消耗API total0/returnedRows0。SDK PID23639归属及3443监听已复核、receiver关闭，既有服务保留。平台timeline开关删除、临时DNS不存在、DevTools缓存禁用恢复0、设备模拟关闭、控制台清空关闭。没有重新启用回调、批准/提交或付费。真实两笔20算力报价拒绝/取消保持前轮结果；真实扣费/退款/供应商/批准恢复/辅助未执行，合成幂等测试不冒充真实费用。
+
+按授权本地提交本任务分支，不合入SDK其他分支，不push/PR/CI/deploy；既有env及未跟踪readiness文档原样保留、不提交。主仓本任务本地提交后合回codex/F065，实际commit/merge由Git及交付回执证明。证据见主仓T134最终节及本机 `/tmp/f065-t134-native-startup-proof.json`、`/tmp/f065-t134-final-consumption.json`、`/tmp/f065-t134-startup-closure-focused.log`。临时证据不是发布制品。
