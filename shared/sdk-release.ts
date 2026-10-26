@@ -1,3 +1,4 @@
+export const localSdkPath = "/f065-sdk/black-rhino-sdk.iife.js";
 export const onlineApiOrigin = "https://api.heixi.com";
 export const onlineSdkVersion = "0.4.0";
 export const documentationVersions = ["0.4.0", "0.3.0"] as const;

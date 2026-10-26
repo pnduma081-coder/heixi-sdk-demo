@@ -81,6 +81,20 @@ export function createHandler(
     )
       return false;
     try {
+      // 本地只开放显式credits接收；沿既有验签及SQLite事务完成后才ACK。
+      const localCredits =
+        config.localCreditsEnabled === true &&
+        path === "/webhooks/credits" &&
+        req.method === "POST";
+      if (
+        config.public.sdkMode === "f065-local" &&
+        !localCredits &&
+        (webhook ||
+          (req.method !== "GET" &&
+            req.method !== "HEAD" &&
+            path !== "/api/sdk/signature"))
+      )
+        throw new AppError(403, "本地只读验收不允许此操作");
       if (webhook && req.method === "POST") {
         const topic = path.endsWith("credits") ? "credits" : "generation";
         const event = await webhookKeys.verify(

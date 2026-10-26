@@ -83,6 +83,7 @@ export type SessionState = {
   }>;
 };
 export type DemoConfig = {
+  sdkMode?: "f065-local";
   apiOrigin?: string;
   sdkScriptUrl?: string;
   sdkVersion?: string;

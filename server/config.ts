@@ -20,6 +20,8 @@ export type Config = {
   public: DemoConfig;
   dataDir: string;
   listenOrigin?: string;
+  localCreditsEnabled?: boolean;
+  localSdk?: { bytes: Buffer; sha256: string };
 };
 
 function exactOrigin(value: string, name: string) {

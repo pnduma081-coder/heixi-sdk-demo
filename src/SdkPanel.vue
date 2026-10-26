@@ -12,7 +12,7 @@ import type { DemoConfig, User } from "../shared/types.ts";
 import Icon from "./AppIcon.vue";
 import { delayedFeedback } from "./delayed-feedback.ts";
 import PagePlaceholder from "./PagePlaceholder.vue";
-import { createSdkOptions, loadSdk } from "./sdk.ts";
+import { createSdkOptions, loadSdk, localSdkTrace } from "./sdk.ts";
 import {
   SdkWorkspace,
   sdkFailureMessage,
@@ -52,6 +52,51 @@ watch(
 );
 const actorId = props.user.id;
 let mounted = false;
+let stopTrace = () => {};
+function observeLocalStartup() {
+  if (props.config.sdkMode !== "f065-local") return;
+  const receive = (event: MessageEvent) => {
+    const frame = container.value?.querySelector("iframe");
+    if (
+      event.source !== frame?.contentWindow ||
+      event.origin !== props.config.sdkApiOrigin ||
+      event.data?.channel !== "black-rhino-sdk"
+    )
+      return;
+    if (
+      ["hello", "initialize", "fatal", "navigation"].includes(event.data.method)
+    )
+      localSdkTrace(`frame-${event.data.method}-${event.data.kind}`);
+  };
+  const resources = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      const url = new URL(entry.name);
+      if (
+        url.origin === props.config.sdkApiOrigin &&
+        url.pathname === "/api/v1/sdk/client/launch"
+      )
+        localSdkTrace("launch-response");
+    }
+  });
+  resources.observe({ type: "resource", buffered: false });
+  const frames = new MutationObserver(() => {
+    const frame = container.value?.querySelector("iframe");
+    if (frame && !frame.dataset.f065Observed) {
+      frame.dataset.f065Observed = "true";
+      localSdkTrace("iframe-created");
+      frame.addEventListener("load", () => localSdkTrace("iframe-load"), {
+        once: true,
+      });
+    }
+  });
+  if (container.value) frames.observe(container.value, { childList: true });
+  window.addEventListener("message", receive);
+  stopTrace = () => {
+    window.removeEventListener("message", receive);
+    resources.disconnect();
+    frames.disconnect();
+  };
+}
 const workspace = new SdkWorkspace(
   async (target, signal) => {
     failure.value = "";
@@ -66,12 +111,19 @@ const workspace = new SdkWorkspace(
       throw Object.assign(new Error("SDK 页面来源与配置不一致"), {
         code: "HOST_ORIGIN_MISMATCH",
       });
-    await loadSdk(onlineSdkUrl);
+    if (props.config.sdkMode === "f065-local") localSdkTrace("load-sdk-start");
+    await loadSdk(
+      props.config.sdkScriptUrl ?? onlineSdkUrl,
+      props.config.sdkMode,
+    );
+    if (props.config.sdkMode === "f065-local")
+      localSdkTrace("load-sdk-complete");
     if (signal.aborted) throw new DOMException("已取消", "AbortError");
     if (!container.value || !window.BlackRhinoSDK || signal.aborted)
       throw new DOMException("已取消", "AbortError");
     const openSdk = window.BlackRhinoSDK.init(
       createSdkOptions(actorId, {
+        localReadOnly: props.config.sdkMode === "f065-local",
         onRefresh: () => emit("refresh"),
         onRecharge: () => emit("recharge"),
         onError: (error) => {
@@ -109,8 +161,11 @@ const workspace = new SdkWorkspace(
             if (!signal.aborted)
               failure.value = "用户资料暂未更新，请稍后重试。";
           });
+      if (props.config.sdkMode === "f065-local") localSdkTrace("ready");
       return instance;
     } catch (error) {
+      if (props.config.sdkMode === "f065-local")
+        localSdkTrace(timedOut ? "startup-timeout" : "startup-failed");
       if (timedOut)
         throw Object.assign(new Error("Page startup timed out"), {
           code: "TIMEOUT",
@@ -135,7 +190,10 @@ function show() {
 onMounted(async () => {
   mounted = true;
   await nextTick();
-  if (mounted) void show();
+  if (mounted) {
+    observeLocalStartup();
+    void show();
+  }
 });
 watch([() => props.page, () => props.resourceId], () => {
   if (mounted) void show();
@@ -154,6 +212,7 @@ watch(
 );
 onBeforeUnmount(() => {
   mounted = false;
+  stopTrace();
   navigationFeedback.dispose();
   workspace.dispose();
 });

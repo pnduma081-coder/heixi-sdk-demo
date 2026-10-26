@@ -10,9 +10,10 @@ import {
 } from "node:https";
 import { resolve } from "node:path";
 import { createServer as createViteServer } from "vite";
-import { onlineSdkVersion } from "../shared/sdk-release.ts";
+import { localSdkPath, onlineSdkVersion } from "../shared/sdk-release.ts";
 import { type Config, loadConfig, root } from "./config.ts";
 import { EventPoller } from "./event-poller.ts";
+import { localReadTransport } from "./f065-local.ts";
 import { createHandler, errorResponse } from "./http.ts";
 import { MediaStore } from "./media.ts";
 import { MerchantClient } from "./merchant.ts";
@@ -61,11 +62,24 @@ export async function startDemo(
     key = resolve(tlsDirectory, "key.pem");
   if (useHttps && (!existsSync(cert) || !existsSync(key)))
     throw new Error("请先运行 pnpm setup:local 准备本地证书");
+  const local = config.public.sdkMode === "f065-local";
+  if (local && !config.localSdk) throw new Error("本地 SDK 制品缺失");
   const store = new Store(resolve(config.dataDir, "demo.sqlite"));
-  const api = new MerchantClient(config.apiOrigin, config.apiKey, fetch, {
-    version: onlineSdkVersion,
-    accessKey: config.accessKey,
-  });
+  const api = new MerchantClient(
+    config.apiOrigin,
+    config.apiKey,
+    local
+      ? localReadTransport(
+          config.apiOrigin,
+          fetch,
+          config.localCreditsEnabled === true,
+        )
+      : fetch,
+    {
+      version: onlineSdkVersion,
+      accessKey: config.accessKey,
+    },
+  );
   const results = new ResultService(
     store,
     api,
@@ -79,7 +93,15 @@ export async function startDemo(
     results,
   );
   const listener: RequestListener = (req, res) => {
+    // 仅原回调域名的既有credits路径接受新增入口，不能把它当作宿主页来源。
+    const localCreditsRequest =
+      local &&
+      config.localCreditsEnabled === true &&
+      req.headers.host === "rhino-callback.laotangcode.shop" &&
+      req.method === "POST" &&
+      req.url === "/webhooks/credits";
     if (
+      !localCreditsRequest &&
       ![new URL(hostOrigin).host, new URL(listenOrigin).host].includes(
         req.headers.host || "",
       )
@@ -89,6 +111,21 @@ export async function startDemo(
     }
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
+    if (
+      local &&
+      new URL(req.url || "/", hostOrigin).pathname === localSdkPath
+    ) {
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        res.writeHead(405).end();
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "application/javascript",
+        "Cache-Control": "no-store",
+      });
+      res.end(req.method === "HEAD" ? undefined : config.localSdk?.bytes);
+      return;
+    }
     void handle(req, res)
       .then((handled) => {
         if (!handled) vite.middlewares(req, res);
@@ -134,11 +171,12 @@ export async function startDemo(
     (userId, now) => results.inbox.nextRetryAt(userId, now),
   );
   results.onActivity = (userId) => poller.wake(userId);
-  const pollTimer = config.public.apiReady
-    ? setInterval(() => {
-        void poller.tick();
-      }, 1000)
-    : undefined;
+  const pollTimer =
+    !local && config.public.apiReady
+      ? setInterval(() => {
+          void poller.tick();
+        }, 1000)
+      : undefined;
   async function stop() {
     if (stopping) return;
     stopping = true;
