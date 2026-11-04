@@ -231,9 +231,9 @@ onBeforeUnmount(() => {
     <p class="hint">由商户后端直接调用生成接口，实际消耗由黑犀商户账户结算。</p>
     <div class="toolbar">
       <select v-model="operation" :disabled="busy" aria-label="API 示例"><option v-for="item in examples" :key="item.id" :value="item.id">{{ item.label }} · {{ item.method }}</option></select>
-      <button :disabled="busy || !ready" @click="execute">调用 API</button><button :disabled="busy" @click="reset">重置模板</button><button :disabled="busy" @click="freshId">新请求号</button>
+      <button :disabled="busy || !ready" @click="execute">调用 API</button><button :disabled="busy" @click="reset">重置模板</button><button v-if="examples.find(item => item.id === operation)?.method === 'POST'" :disabled="busy" @click="freshId">新请求号</button>
     </div>
-    <p class="hint">{{ examples.find(item => item.id === operation)?.path }} · 身份由后端注入。超时重试保留原请求号。</p>
+    <p class="hint">{{ examples.find(item => item.id === operation)?.path }} · {{ operation === 'account' ? '查询商户本人账户，请求参数须为 {}。该快照不代表本地用户余额。' : '身份由后端注入。超时重试保留原请求号。' }}</p>
     <div class="toolbar">
       <label>上传图片 <input type="file" accept="image/*" :disabled="busy || !ready" @change="upload" /></label>
       <select v-model="assetOne" aria-label="素材一"><option value="">素材一 / 人物或商品</option><option v-for="item in uploads" :key="item.assetId" :value="item.assetId">{{ item.name }}</option></select>

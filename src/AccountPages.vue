@@ -10,6 +10,7 @@ import {
 import type {
   ConnectionReport,
   DemoConfig,
+  MerchantAccount,
   SessionState,
   StoredResult,
 } from "../shared/types.ts";
@@ -38,6 +39,32 @@ const checking = ref(false),
   connection = ref<ConnectionReport>(),
   connectionError = ref("");
 const connectionLifetime = new AbortController();
+const merchantAccount = ref<MerchantAccount>(),
+  accountLoading = ref(false),
+  accountError = ref(""),
+  accountUpdatedAt = ref("");
+async function readMerchantAccount() {
+  if (accountLoading.value) return;
+  accountLoading.value = true;
+  accountError.value = "";
+  merchantAccount.value = undefined;
+  accountUpdatedAt.value = "";
+  try {
+    const snapshot = await api<MerchantAccount>("/api/call", {
+      body: { operation: "account", params: {} },
+      userId: props.session.user.id,
+      signal: connectionLifetime.signal,
+    });
+    if (!connectionLifetime.signal.aborted) {
+      merchantAccount.value = snapshot;
+      accountUpdatedAt.value = new Date().toLocaleString();
+    }
+  } catch (error) {
+    if (!connectionLifetime.signal.aborted) accountError.value = message(error);
+  } finally {
+    accountLoading.value = false;
+  }
+}
 const documentVersion = ref<MerchantVersion>(onlineSdkVersion);
 const docs = computed(() => sdkDocs(documentVersion.value));
 const sdkAddress = onlineSdkUrl;
@@ -163,6 +190,18 @@ onBeforeUnmount(() => {
     <template v-else>
       <div class="page-heading"><div><h1>平台接入</h1><p>查看本平台与黑犀创作服务的连接配置。</p></div><button class="primary" :disabled="checking" @click="diagnose">{{ checking ? '正在检测…' : '检测接入' }}</button></div>
       <p v-if="connectionError" class="error" role="alert">{{ connectionError }}</p>
+      <section class="surface" aria-label="商户账户" aria-live="polite" :aria-busy="accountLoading">
+        <div class="toolbar"><h2>商户算力与会员</h2><button :disabled="accountLoading || !config.apiReady || config.sdkMode === 'f065-local'" @click="readMerchantAccount">{{ accountLoading ? '正在查询…' : '查询商户账户' }}</button></div>
+        <p class="hint">查询当前商户的可用算力和会员状态。手动更新，生成时仍以平台的实时额度与权益检查为准。</p>
+        <p v-if="accountError" class="error" role="alert">{{ accountError }}</p>
+        <dl v-if="merchantAccount">
+          <dt>商户可用算力</dt><dd>{{ merchantAccount.credit.toLocaleString() }}</dd>
+          <dt>会员状态</dt><dd>{{ merchantAccount.membershipActive ? '有效' : '无有效会员' }}</dd>
+          <dt>会员名称 / 等级</dt><dd>{{ merchantAccount.membershipName ?? '未提供' }} / {{ merchantAccount.membershipLevel ?? '未提供' }}</dd>
+          <dt>会员到期时间</dt><dd>{{ merchantAccount.membershipExpireTime ? new Date(merchantAccount.membershipExpireTime).toLocaleString() : '未提供' }}</dd>
+          <dt>查询时间</dt><dd>{{ accountUpdatedAt }}</dd>
+        </dl>
+      </section>
       <section v-if="connection" class="surface connection-report" aria-label="接入检测结果" aria-live="polite"><h2>接入检测结果</h2><p class="hint">后端 API：{{ connection.apiOrigin }} · SDK 来源：{{ connection.parentOrigin }}</p><article v-for="check in connection.checks" :key="check.name"><h3><span class="pill" :class="{ 'pill--green': check.status === 'passed' }">{{ check.status === 'passed' ? '通过' : '未通过' }}</span> {{ check.name }}</h3><p>{{ check.message }}</p><details v-if="check.details"><summary>平台错误与 traceId</summary><pre>{{ pretty(check.details) }}</pre></details></article></section>
       <div class="integration-grid">
         <div class="surface">

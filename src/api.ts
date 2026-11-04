@@ -25,6 +25,7 @@ export async function api<T>(
       response.status,
       `${value.error || `HTTP ${response.status}`}${value.details ? `\n${JSON.stringify(value.details, null, 2)}` : ""}`,
       typeof value.businessCode === "string" ? value.businessCode : undefined,
+      value.details,
     );
   return value;
 }
@@ -34,10 +35,17 @@ export const message = (error: unknown) =>
 export class ApiError extends Error {
   status: number;
   businessCode?: string;
-  constructor(status: number, message: string, businessCode?: string) {
+  details?: unknown;
+  constructor(
+    status: number,
+    message: string,
+    businessCode?: string,
+    details?: unknown,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.businessCode = businessCode;
+    this.details = details;
   }
 }

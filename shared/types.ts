@@ -1,4 +1,18 @@
 export type JsonObject = Record<string, unknown>;
+// 商户本人账户快照，与 externalUserId 对应的用户余额无关。
+export type MerchantAccount = {
+  credit: number;
+  membershipActive: boolean;
+  membershipLevel:
+    | "TRIAL"
+    | "STANDARD"
+    | "PROFESSIONAL"
+    | "ADVANCED"
+    | "FLAGSHIP"
+    | null;
+  membershipName: string | null;
+  membershipExpireTime: string | null;
+};
 export type User = {
   id: string;
   name: string;

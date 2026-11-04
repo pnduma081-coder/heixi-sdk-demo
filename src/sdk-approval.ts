@@ -20,6 +20,15 @@ export async function approveGeneration(
     return approval;
   } catch (error) {
     signal.throwIfAborted();
+    if (
+      error instanceof ApiError &&
+      error.status === 404 &&
+      error.details !== null &&
+      typeof error.details === "object" &&
+      "code" in error.details &&
+      error.details.code === 47001
+    )
+      return { approved: false, message: "AI 模型暂不可用，请重新选择模型" };
     const message =
       error instanceof ApiError && error.status === 409
         ? approvalRejectionMessage(error.businessCode)

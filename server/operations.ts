@@ -58,6 +58,11 @@ export class Operations {
     const example = examples.find((item) => item.id === operation);
     if (!example) throw new AppError(400, "不支持的示例操作");
     const body = { ...params };
+    if (operation === "account") {
+      if (Object.keys(body).length)
+        throw new AppError(400, "商户账户查询不接受任何参数");
+      return this.api.account();
+    }
     if ("externalUserId" in body)
       throw new AppError(400, "身份由后端会话确定，请删除 externalUserId 字段");
     let path: string = example.path;

@@ -12,7 +12,7 @@
 node --disable-warning=ExperimentalWarning server/f065-local-entry.ts --local-env true --sdk-file /var/folders/v2/3lfg2n4s0mn91ftf93bghzrr0000gn/T/f065-sdk040-platform-xsKSWT/packages/sdk/dist/black-rhino-sdk.iife.js
 ```
 
-制品为本机临时构建，失效时须从上述冻结来源重新构建并核对，不回退 CDN。另一无凭据合成模式支持 `--api-origin`、`--host-origin`、`--sdk-file`、`--sdk-sha256`，不可与 local-env 混用。每次入口创建自有临时 SQLite，SIGINT/SIGTERM 退出清理；不使用或维护现有用户账库。
+制品为此前本机临时构建。按当前项目边界，失效时由对应项目提供冻结版本的已构建产物；用户明确指定后，本项目仅可只读校验并写入自己的目录，不负责构建或操作相邻项目，也不回退 CDN。另一无凭据合成模式支持 `--api-origin`、`--host-origin`、`--sdk-file`、`--sdk-sha256`，不可与 local-env 混用。每次入口创建自有临时 SQLite，SIGINT/SIGTERM 退出清理；不使用或维护现有用户账库。
 
 ## 算力回调与拒绝取消
 

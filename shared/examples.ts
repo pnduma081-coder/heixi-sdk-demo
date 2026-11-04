@@ -22,6 +22,13 @@ export const pages = [
 ] as const;
 export const examples = [
   {
+    id: "account",
+    label: "查询商户算力与会员",
+    method: "GET",
+    path: "/open/account",
+    params: {},
+  },
+  {
     id: "models",
     label: "查询主图模型",
     method: "GET",

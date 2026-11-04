@@ -27,6 +27,11 @@ test("historical SDK callback preserves balance refusals and approval semantics"
       const path = new URL(String(input)).pathname;
       requests.push(path);
       if (mode === "network") throw new Error("private network error");
+      if (mode === "modelDisabled")
+        return Response.json(
+          { code: 47001, message: "private model name" },
+          { status: 404 },
+        );
       if (mode === "unknown")
         return Response.json(
           {
@@ -153,6 +158,12 @@ test("historical SDK callback preserves balance refusals and approval semantics"
       request = { ...request, clientRequestId: randomUUID() };
       await assert.rejects(generate, { message: "生成失败，请稍后重试" });
     }
+    mode = "modelDisabled";
+    request = { ...request, clientRequestId: randomUUID() };
+    assert.deepEqual(await generate(), {
+      approved: false,
+      message: "AI 模型暂不可用，请重新选择模型",
+    });
     assert.equal(approvals, 1);
     const cancelled = new AbortController();
     cancelled.abort();
@@ -208,5 +219,41 @@ test("SDK refusal does not trust plain 409 text, unknown codes, wrong statuses o
     );
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("SDK model refusal requires both HTTP 404 and numeric business 47001 and never exposes upstream details", async (t) => {
+  let response = Response.json(
+    {
+      error: "private upstream message",
+      details: {
+        code: 47001,
+        message: "private model name",
+        traceId: "private trace",
+      },
+    },
+    { status: 404 },
+  );
+  t.mock.method(globalThis, "fetch", async () => response.clone());
+  const signal = new AbortController().signal;
+  assert.deepEqual(await approveGeneration("demo-a", {}, signal), {
+    approved: false,
+    message: "AI 模型暂不可用，请重新选择模型",
+  });
+  for (const value of [
+    { status: 404, details: undefined },
+    { status: 404, details: null },
+    { status: 404, details: { code: "47001" } },
+    { status: 404, details: { code: 40400 } },
+    { status: 500, details: { code: 47001 } },
+    { status: 409, details: { code: 47001 } },
+  ]) {
+    response = Response.json(
+      { error: "private upstream message", details: value.details },
+      { status: value.status },
+    );
+    await assert.rejects(() => approveGeneration("demo-a", {}, signal), {
+      message: "生成失败，请稍后重试",
+    });
   }
 });
